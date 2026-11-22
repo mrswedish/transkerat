@@ -1,0 +1,154 @@
+name: Build Transkerat
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: meta
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Recreate latest release & ensure versioned release exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          sleep 2
+
+          cat <<EOF > release_notes.md
+          ## Nedladdning (v${VER})
+
+          **Transkerat** — 100 % lokal svensk transkribering (**Pianissimo**) och integritetsmaskering/avmaskering (**Maskera Lager 1 & 2**).
+
+          ### Windows (64-bit)
+          | Fil | Beskrivning |
+          |---|---|
+          | \`Transkerat-portabel.exe\` | **Portabel** — kör direkt utan installation |
+          | \`Transkerat_${VER}_x64-setup.exe\` | Installerare — installerar i Start-menyn |
+
+          ### macOS (Apple Silicon — M1/M2/M3/M4)
+          | Fil | Beskrivning |
+          |---|---|
+          | \`Transkerat_${VER}_aarch64.dmg\` | **Skivavbild (.dmg)** — dra Transkerat till Program (*Applications*) |
+          | \`Transkerat_${VER}_macOS_arm64.app.zip\` | Komprimerat \`.app\`-paket |
+
+          > **Tips vid första start på macOS:** Eftersom appen inte är Apple-notariserad kan Gatekeeper visa en varning första gången. Högerklicka på appen → **Öppna** (eller kör \`xattr -cr /Applications/Transkerat.app\` i Terminal).
+          EOF
+
+          gh release create latest \
+            --target "$GITHUB_SHA" \
+            --title "Transkerat v${VER} — Latest Build (Windows & macOS)" \
+            --notes-file release_notes.md \
+            --latest
+
+          if ! gh release view "v${VER}" > /dev/null 2>&1; then
+            gh release create "v${VER}" \
+              --target "$GITHUB_SHA" \
+              --title "Transkerat v${VER} — Windows & macOS" \
+              --notes-file release_notes.md \
+              --latest=false
+          else
+            gh release edit "v${VER}" \
+              --title "Transkerat v${VER} — Windows & macOS" \
+              --notes-file release_notes.md
+          fi
+
+  build-windows:
+    needs: prepare-release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Windows Tauri app
+        run: npx tauri build
+
+      - name: Upload Windows artifacts to latest & v${{ needs.prepare-release.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          Copy-Item "src-tauri/target/release/transkerat.exe" "Transkerat-portabel.exe"
+          $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $msiFile  = Get-ChildItem -Path "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
+
+          gh release upload latest "Transkerat-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+          gh release upload "v$env:VER" "Transkerat-portabel.exe" $setupExe.FullName $msiFile.FullName --clobber
+
+  build-macos:
+    needs: prepare-release
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build macOS Tauri app (Apple Silicon + ad-hoc sign)
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Package & upload macOS artifacts to latest & v${{ needs.prepare-release.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          DMG_SRC=$(ls "$BUNDLE_DIR"/dmg/*.dmg | head -n 1)
+          DMG_OUT="Transkerat_${VER}_aarch64.dmg"
+          cp "$DMG_SRC" "$DMG_OUT"
+
+          APP_DIR="$BUNDLE_DIR/macos"
+          APP_NAME=$(ls "$APP_DIR" | grep '\.app$' | head -n 1)
+          codesign --force --deep --sign - "$APP_DIR/$APP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_DIR/$APP_NAME" "Transkerat_${VER}_macOS_arm64.app.zip"
+
+          gh release upload latest "$DMG_OUT" "Transkerat_${VER}_macOS_arm64.app.zip" --clobber
+          gh release upload "v$VER" "$DMG_OUT" "Transkerat_${VER}_macOS_arm64.app.zip" --clobber

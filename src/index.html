@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="sv">
+
+<head>
+  <meta charset="utf-8" />
+  <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+  <title>Transkerat</title>
+  <link href="/app.css" rel="stylesheet" />
+  <script type="module" src="/main.js" defer></script>
+</head>
+
+<body class="bg-paper text-ink h-screen overflow-x-hidden overflow-y-auto flex flex-col">
+  <a href="#main-content" class="skip-link">Hoppa till arbetsytan</a>
+  <p id="sr-status" class="sr-only" role="status" aria-live="polite"></p>
+
+  <!-- Rad 1: namn och verktyg -->
+  <header class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 min-h-12 px-5 py-1 bg-sheet border-b border-line shrink-0">
+    <div class="flex items-baseline gap-2.5">
+      <h1 class="text-[15px] font-semibold tracking-tight">Transkerat</h1>
+      <span class="text-xs text-muted">100 % lokalt · Svenska</span>
+    </div>
+    <div class="flex flex-wrap items-center gap-1">
+      <button id="btn-file" class="btn btn-ghost btn-sm"
+        title="Öppna en ljud- eller videofil, eller en av dina senaste inspelningar">
+        <span class="material-symbols-outlined">folder_open</span>
+        <span>Öppna</span>
+      </button>
+      <button id="btn-theme" class="btn btn-ghost btn-sm btn-icon-only" aria-label="Byt tema"
+        title="Växla mellan ljust och mörkt tema">
+        <span id="theme-icon" class="material-symbols-outlined">dark_mode</span>
+      </button>
+      <button id="btn-settings" class="btn btn-ghost btn-sm" title="Inställningar">
+        <span class="material-symbols-outlined">settings</span>
+        <span>Inställningar</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Rad 2: källa — spela in eller öppna ljud -->
+  <section class="bg-sheet border-b border-line px-5 py-3 shrink-0" aria-label="Spela in eller öppna ljud">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-3">
+      <button id="btn-record" aria-label="Spela in" class="btn btn-primary btn-record">
+        <span class="btn-icon rec-glyph"></span>
+        <span class="btn-record-label">Spela in</span>
+      </button>
+
+      <div id="idle-hint" class="flex-1 min-w-0 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div class="flex items-center gap-2 min-w-0 flex-1 max-w-sm">
+          <label for="mic-select" class="text-sm text-muted shrink-0">Mikrofon</label>
+          <select id="mic-select" class="field truncate">
+            <option value="default">Systemets standardmikrofon</option>
+          </select>
+        </div>
+        <label id="wasapi-quick"
+          title="Slå på för möten i Teams, Zoom m.fl. — annars spelas bara din egen mikrofon in"
+          class="hidden items-center gap-2 cursor-pointer text-sm select-none">
+          <input type="checkbox" id="wasapi-toggle" class="w-5 h-5 accent-primary cursor-pointer">
+          <span>Spela in systemljud</span>
+        </label>
+        <label id="speakers-quick" class="flex items-center gap-2 cursor-pointer text-sm select-none"
+          title="Märker vem som säger vad. Tar några minuter extra per timme ljud. Modellerna (ca 33 MB) hämtas första gången.">
+          <input type="checkbox" id="speakers-toggle" class="w-5 h-5 accent-primary cursor-pointer">
+          <span>Identifiera talare</span>
+        </label>
+        <p id="wasapi-hint" class="hidden w-full text-sm text-muted">
+          Bara din mikrofon spelas in. Slå på systemljud för att även få med vad andra säger i Teams eller Zoom.
+        </p>
+      </div>
+
+      <div id="recording-status" class="hidden flex items-center gap-4 flex-1 min-w-0">
+        <div id="eq-bar" class="meter" aria-hidden="true"><div class="eq-col"></div></div>
+        <span id="recording-status-text" class="text-sm font-medium" role="status">Spelar in</span>
+        <span id="loopback-indicator" class="hidden text-sm text-muted">Systemljud med</span>
+        <div class="flex-1"></div>
+        <span class="font-mono text-sm tabular-nums" id="recording-timer">00:00:00</span>
+        <span class="font-mono text-sm text-muted tabular-nums" id="recording-size">0 MB</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Arbetsyta med 3 steg-flikar -->
+  <main id="main-content" tabindex="-1" class="flex-1 flex flex-col px-5 pt-3 pb-4 overflow-hidden min-h-[26rem] outline-none">
+
+    <!-- Steg-flikar -->
+    <div class="step-tabs shrink-0" role="tablist" aria-label="Arbetsflöde">
+      <button id="tab-transcribe" type="button" class="step-tab" role="tab" aria-selected="true" aria-controls="panel-transcribe">
+        <span class="step-num">1</span>
+        <span>Transkribering</span>
+      </button>
+      <button id="tab-mask" type="button" class="step-tab" role="tab" aria-selected="false" aria-controls="panel-mask">
+        <span class="step-num">2</span>
+        <span>Maskera</span>
+        <span id="tab-mask-badge" class="step-badge hidden">0</span>
+      </button>
+      <button id="tab-unmask" type="button" class="step-tab" role="tab" aria-selected="false" aria-controls="panel-unmask">
+        <span class="step-num">3</span>
+        <span>Avmaskera AI-svar</span>
+        <span id="tab-unmask-badge" class="step-badge hidden">0</span>
+      </button>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- STEG 1: TRANSKRIBERING                                             -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <section id="panel-transcribe" role="tabpanel" aria-labelledby="tab-transcribe" class="flex-1 flex flex-col min-h-0">
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-3 shrink-0">
+        <div class="flex flex-wrap items-center gap-1">
+          <button id="btn-search" class="btn btn-ghost btn-sm" title="Sök och ersätt (Ctrl+F)">
+            <span class="material-symbols-outlined">search</span>
+            <span>Sök</span>
+          </button>
+          <button id="btn-apply-vocab" class="btn btn-ghost btn-sm" title="Rätta texten med dina ordlistor">
+            <span class="material-symbols-outlined">spellcheck</span>
+            <span>Ordlista</span>
+          </button>
+          <button id="btn-segment-toggle" class="hidden btn btn-ghost btn-sm" title="Växla segmentvy / råtext">
+            <span class="material-symbols-outlined">view_list</span>
+            <span id="segment-toggle-label">Segmentvy</span>
+          </button>
+          <button id="btn-redo" class="hidden btn btn-ghost btn-sm" title="Gör om transkriberingen">
+            <span class="material-symbols-outlined">refresh</span>
+            <span>Gör om</span>
+          </button>
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <button id="btn-copy" class="btn btn-sm">
+            <span class="material-symbols-outlined">content_copy</span>
+            <span>Kopiera</span>
+          </button>
+          <button id="btn-save" class="btn btn-sm">
+            <span class="material-symbols-outlined">save</span>
+            <span>Spara text</span>
+          </button>
+          <button id="btn-save-audio" class="hidden btn btn-sm" title="Spara inspelad ljudfil">
+            <span class="material-symbols-outlined">audio_file</span>
+            <span>Spara ljud</span>
+          </button>
+          <span class="w-px h-5 bg-line mx-0.5" aria-hidden="true"></span>
+          <button id="btn-goto-mask" class="btn btn-primary btn-sm" title="Gå vidare till steg 2 för att maskera personuppgifter">
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>Maskera text →</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Meddelanderad -->
+      <div id="notice-bar" class="hidden mb-3 px-3 py-2 bg-sheet border border-line border-l-[3px] border-l-primary rounded-lg text-sm flex items-center gap-3 shrink-0"
+        role="status" aria-live="polite">
+        <span id="notice-text" class="flex-1 min-w-0"></span>
+        <button id="notice-action" class="hidden btn btn-sm shrink-0"></button>
+        <button id="notice-close" class="btn btn-ghost btn-sm btn-icon-only shrink-0" aria-label="Stäng meddelandet">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+
+      <!-- Sök/ersätt -->
+      <div id="search-bar" class="hidden mb-3 flex flex-wrap items-center gap-2 shrink-0" role="search" aria-label="Sök och ersätt i texten">
+        <input id="search-input" type="text" placeholder="Sök" aria-label="Sök" class="field flex-1 min-w-[9rem]" />
+        <input id="replace-input" type="text" placeholder="Ersätt med" aria-label="Ersätt med" class="field flex-1 min-w-[9rem]" />
+        <button id="btn-replace-one" class="btn btn-sm">Ersätt</button>
+        <button id="btn-replace-all" class="btn btn-sm">Ersätt alla</button>
+        <button id="btn-close-search" class="btn btn-ghost btn-sm btn-icon-only" aria-label="Stäng sök">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+
+      <!-- Pappret -->
+      <div class="relative flex-1 min-h-0 bg-sheet border border-line rounded-lg overflow-hidden flex flex-col">
+        <!-- Spelare -->
+        <div id="player-bar" class="hidden flex items-center gap-3 px-5 py-2.5 border-b border-line shrink-0">
+          <button id="btn-play-pause" class="btn btn-icon-only" aria-label="Spela upp">
+            <span id="play-icon" class="material-symbols-outlined">play_arrow</span>
+          </button>
+          <span id="player-time" class="text-sm font-mono tabular-nums text-muted shrink-0 w-12">0:00</span>
+          <div id="player-track" role="slider" tabindex="0" aria-label="Position i inspelningen" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"
+            class="relative flex-1 h-1.5 bg-control rounded-sm cursor-pointer before:absolute before:-inset-y-3 before:inset-x-0 before:content-['']">
+            <div id="player-fill" class="h-full bg-primary rounded-sm" style="width:0%"></div>
+          </div>
+          <span id="player-duration" class="text-sm font-mono tabular-nums text-muted shrink-0 w-12 text-right">0:00</span>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-4 sm:px-8 py-6 flex flex-col">
+          <div class="w-full max-w-[44rem] mx-auto flex-1 flex flex-col">
+            <textarea id="output-text"
+              class="transcript-text flex-1 w-full bg-transparent border-none focus:ring-0 p-0 placeholder:text-muted resize-none"
+              style="min-height: 200px;"
+              placeholder="Spela in ett möte, öppna en ljudfil eller klistra in svensk text här."></textarea>
+            <div id="segment-editor" class="hidden flex-1" style="min-height: 200px;"></div>
+          </div>
+        </div>
+
+        <!-- Efter inspelning -->
+        <div id="post-recording-actions" class="hidden absolute inset-0 bg-sheet z-10 flex items-center justify-center px-8">
+          <div class="w-full max-w-sm flex flex-col gap-4">
+            <h3 id="post-recording-title" class="text-lg font-semibold">Inspelningen är sparad</h3>
+            <button id="post-recording-path"
+              class="hidden max-w-full text-sm font-mono text-primary hover:underline text-left flex items-center gap-2"
+              title="Öppna inspelningsmappen">
+              <span class="material-symbols-outlined">folder_open</span>
+              <span id="post-recording-path-text" class="truncate"></span>
+            </button>
+            <div id="session-name-row" class="hidden">
+              <label for="session-name-input" class="block text-sm text-muted mb-1">Namn på inspelningen (valfritt)</label>
+              <input type="text" id="session-name-input" maxlength="40" class="field" />
+            </div>
+            <div class="flex flex-wrap gap-2 mt-1">
+              <button id="btn-start-transcription" class="btn btn-primary">
+                <span class="material-symbols-outlined">transcribe</span>
+                <span>Transkribera nu</span>
+              </button>
+              <button id="btn-close-opened" class="hidden btn">Stäng</button>
+              <button id="btn-save-for-later" class="btn">
+                <span class="material-symbols-outlined">schedule</span>
+                <span>Spara för senare</span>
+              </button>
+            </div>
+            <button id="btn-save-audio-only" class="btn btn-ghost btn-sm self-start -ml-2">
+              <span class="material-symbols-outlined">audio_file</span>
+              <span>Spara en kopia som ljudfil…</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Transkriberar / Laddar modell -->
+        <div id="loading-overlay" class="hidden absolute inset-0 bg-sheet/95 z-10 flex items-center justify-center px-8"
+          role="group" aria-label="Arbete pågår">
+          <div class="w-full max-w-xs flex flex-col gap-3">
+            <span id="loading-text" class="font-medium">Transkriberar…</span>
+            <div id="progress-container" class="hidden w-full h-1.5 bg-control rounded-sm overflow-hidden" role="progressbar" aria-label="Förlopp" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="progress-bar" class="h-full bg-primary transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <button id="btn-cancel-transcription" class="hidden btn btn-sm self-start">Avbryt</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- STEG 2: MASKERA                                                    -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <section id="panel-mask" role="tabpanel" aria-labelledby="tab-mask" class="hidden flex-1 flex flex-col min-h-0">
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-3 shrink-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="seg-group" role="group" aria-label="Maskeringsprofil">
+            <button id="btn-preset-ai-safe" type="button" class="seg-btn" aria-pressed="true"
+              title="Maskerar personnummer, kontaktuppgifter, org.nr, konton, nycklar, personer, organisationer och platser">
+              AI-säker
+            </button>
+            <button id="btn-preset-strict" type="button" class="seg-btn" aria-pressed="false"
+              title="Maskerar allt i AI-säker samt yrkesroller/titlar (Roll/Titel), IP-adresser, tider och händelser">
+              Strikt (inkl. Roll/Titel)
+            </button>
+          </div>
+          <button id="btn-run-mask" type="button" class="btn btn-sm">
+            <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>Analysera</span>
+          </button>
+          <div class="seg-group" role="group" aria-label="Visningsläge">
+            <button id="btn-mask-view-review" type="button" class="seg-btn" aria-pressed="true">Granska</button>
+            <button id="btn-mask-view-masked" type="button" class="seg-btn" aria-pressed="false">Maskerad text</button>
+          </div>
+          <button id="btn-manual-mask" type="button" class="hidden btn btn-sm" title="Maskera markerad text manuellt">
+            <span>+ Maskera markering</span>
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-1.5">
+          <button id="btn-copy-masked" type="button" class="btn btn-primary btn-sm" disabled>
+            <span class="material-symbols-outlined">content_copy</span>
+            <span>Kopiera maskerat</span>
+          </button>
+          <button id="btn-save-masked" type="button" class="btn btn-sm" disabled>
+            <span class="material-symbols-outlined">save</span>
+            <span>Spara</span>
+          </button>
+          <button id="btn-goto-unmask" type="button" class="btn btn-sm" disabled>
+            <span>Avmaskera AI-svar →</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Statusrad / kategoriräknare för maskering -->
+      <div id="mask-summary-bar" class="hidden mb-3 px-3 py-2 bg-sheet border border-line rounded-lg flex flex-wrap items-center gap-2 text-xs shrink-0">
+        <span id="mask-summary-text" class="text-sm font-medium mr-1"></span>
+        <div id="mask-category-pills" class="flex flex-wrap items-center gap-1.5"></div>
+        <span class="flex-1"></span>
+        <span class="text-muted">Klicka på en markering för att undanta · Markera text för manuell maskering</span>
+      </div>
+
+      <!-- Pappret för Maskera -->
+      <div class="relative flex-1 min-h-0 bg-sheet border border-line rounded-lg overflow-hidden flex flex-col">
+        <div class="flex-1 overflow-y-auto px-4 sm:px-8 py-6 flex flex-col">
+          <div class="w-full max-w-[44rem] mx-auto flex-1 flex flex-col">
+            <!-- Tomt läge -->
+            <div id="mask-empty-state" class="flex-1 flex flex-col items-center justify-center text-center py-12 gap-3">
+              <svg class="w-10 h-10 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <p id="mask-empty-msg" class="text-sm text-muted max-w-md">
+                Transkribera ljud eller skriv text i steg 1, och klicka sedan på <strong>Analysera</strong> för att maskera personuppgifter 100 % lokalt.
+              </p>
+            </div>
+
+            <!-- Interaktiv granskningsvy -->
+            <div id="mask-review" class="hidden mask-review-body flex-1"></div>
+
+            <!-- Maskerad textvy -->
+            <textarea id="mask-output" readonly
+              class="hidden transcript-text flex-1 w-full bg-transparent border-none focus:ring-0 p-0 resize-none"
+              style="min-height: 220px;"></textarea>
+          </div>
+        </div>
+
+        <!-- Översättningstabell (hopfällbar längst ned) -->
+        <details id="mask-table-details" class="hidden border-t border-line bg-paper/60 shrink-0">
+          <summary class="px-5 py-2.5 text-sm font-medium cursor-pointer select-none flex flex-wrap items-center justify-between gap-2">
+            <span>Översättningstabell (<span id="mask-table-count">0</span> unika värden · <span id="mask-storage-status" class="text-muted font-normal">Endast i arbetsminnet</span>)</span>
+            <button id="btn-clear-mask-key" type="button" class="hidden btn btn-ghost btn-sm btn-danger" title="Ta bort sparad maskeringsnyckel från sessionsmappen">
+              <span class="material-symbols-outlined">delete</span>
+              <span>Rensa nyckel</span>
+            </button>
+          </summary>
+          <div class="max-h-48 overflow-y-auto px-5 pb-3">
+            <table class="trans-table">
+              <thead>
+                <tr>
+                  <th>Platshållare</th>
+                  <th>Original</th>
+                  <th>Kategori</th>
+                  <th>Antal</th>
+                </tr>
+              </thead>
+              <tbody id="mask-table-body"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <!-- Laddningsöverlägg för Maskera (laddar ner / kör Svensk BERT NER) -->
+        <div id="mask-loading-overlay" class="hidden absolute inset-0 bg-sheet/95 z-10 flex items-center justify-center px-8"
+          role="group" aria-label="Maskering pågår">
+          <div class="w-full max-w-xs flex flex-col gap-3">
+            <span id="mask-loading-text" class="font-medium">Analyserar text…</span>
+            <div id="mask-progress-container" class="w-full h-1.5 bg-control rounded-sm overflow-hidden">
+              <div id="mask-progress-bar" class="h-full bg-primary transition-all duration-200" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- STEG 3: AVMASKERA AI-SVAR                                          -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <section id="panel-unmask" role="tabpanel" aria-labelledby="tab-unmask" class="hidden flex-1 flex flex-col min-h-0">
+      <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-3 shrink-0">
+        <div class="text-sm text-muted" id="unmask-table-status">
+          Ingen aktiv översättningstabell än — maskera text i steg 2 först.
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <span id="unmask-count-badge" class="hidden text-xs font-mono px-2 py-1 rounded bg-tone text-primary font-semibold">0 återställda</span>
+          <button id="btn-unmask-paste" type="button" class="btn btn-sm">
+            <span>Klistra in AI-svar</span>
+          </button>
+          <button id="btn-unmask-clear" type="button" class="btn btn-ghost btn-sm">
+            <span>Rensa</span>
+          </button>
+          <button id="btn-copy-unmasked" type="button" class="btn btn-primary btn-sm" disabled>
+            <span class="material-symbols-outlined">content_copy</span>
+            <span>Kopiera avmaskerat</span>
+          </button>
+          <button id="btn-save-unmasked" type="button" class="btn btn-sm" disabled>
+            <span class="material-symbols-outlined">save</span>
+            <span>Spara</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <!-- Vänster: Klistra in AI-svar -->
+        <div class="bg-sheet border border-line rounded-lg flex flex-col overflow-hidden min-h-0">
+          <div class="px-4 py-2 border-b border-line text-xs font-semibold text-muted shrink-0">
+            AI-svar med platshållare (t.ex. [PERSON A], [ROLL A])
+          </div>
+          <textarea id="unmask-input"
+            class="flex-1 w-full p-4 bg-transparent border-none focus:ring-0 resize-none text-[15px] leading-relaxed"
+            placeholder="Klistra in svaret från ChatGPT, Copilot, Claude eller annan AI-tjänst här…"></textarea>
+        </div>
+
+        <!-- Höger: Avmaskerat svar -->
+        <div class="bg-sheet border border-line rounded-lg flex flex-col overflow-hidden min-h-0">
+          <div class="px-4 py-2 border-b border-line text-xs font-semibold text-primary shrink-0">
+            Avmaskerat svar (100 % lokalt)
+          </div>
+          <textarea id="unmask-output" readonly
+            class="transcript-text flex-1 w-full p-4 bg-transparent border-none focus:ring-0 resize-none"
+            placeholder="Här visas svaret automatiskt med alla riktiga namn, roller och uppgifter återställda lokalt."></textarea>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Hidden audio element for playback -->
+  <audio id="audio-player" preload="metadata" style="display:none"></audio>
+
+  <!-- Statusrad -->
+  <footer class="min-h-8 px-5 py-1 bg-sheet border-t border-line flex flex-wrap items-center gap-x-6 gap-y-0 text-xs text-muted shrink-0">
+    <span id="status-badge">Redo</span>
+    <span class="flex-1"></span>
+    <span class="truncate">Mikrofon: <span id="footer-mic">Standardmikrofon</span></span>
+    <span class="truncate">Tal: <span id="footer-model">Pianissimo (svenska)</span></span>
+    <span class="truncate">Maskering: <span id="footer-ner">Svensk BERT NER</span></span>
+    <span id="footer-disk">Ledigt: 0 GB</span>
+  </footer>
+
+  <!-- Inställningar — panel från höger -->
+  <div id="settings-modal" class="hidden fixed inset-0 bg-black/40 z-[100] flex justify-end"
+    role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="bg-sheet w-full max-w-[30rem] h-full border-l border-line flex flex-col">
+      <div class="flex items-center justify-between h-12 px-6 border-b border-line shrink-0">
+        <h2 id="settings-title" class="text-[15px] font-semibold">Inställningar</h2>
+        <button id="btn-close-settings" class="btn btn-ghost btn-sm btn-icon-only" aria-label="Stäng inställningar">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto">
+
+        <!-- Ordlistor -->
+        <section class="section" aria-labelledby="vocab-title">
+          <h3 id="vocab-title" class="section-title">Ordlistor</h3>
+          <p class="hint mb-3">Rättar ord som ofta hörs fel i texten, till exempel "Kulturum" till "Qulturum". Ordlistor som är ikryssade används vid transkribering.</p>
+          <ul id="vocab-lists" class="flex flex-col gap-2 mb-3" role="list"></ul>
+          <div class="flex gap-2 mb-4">
+            <button id="vocab-new" class="btn btn-sm" data-autofocus>
+              <span class="material-symbols-outlined">add</span>
+              <span>Ny ordlista</span>
+            </button>
+            <button id="vocab-delete" class="btn btn-sm btn-danger">
+              <span class="material-symbols-outlined">delete</span>
+              <span>Ta bort vald</span>
+            </button>
+          </div>
+          <div id="vocab-editor" class="hidden">
+            <label for="vocab-list-name" class="text-sm font-semibold">Namn på vald ordlista</label>
+            <input type="text" id="vocab-list-name" maxlength="40" class="field mt-1 mb-3" />
+            <label for="vocabulary-input" class="text-sm font-semibold">Ord i listan</label>
+            <textarea id="vocabulary-input" rows="7" placeholder="Qulturum&#10;Kulturum =&gt; Qulturum&#10;angio plastik =&gt; angioplastik" class="field mt-1 font-mono text-[13px] resize-y"></textarea>
+            <ul class="hint mt-2 list-disc pl-5">
+              <li><code class="font-mono">Qulturum</code> — liknande stavningar rättas, även med ändelse.</li>
+              <li><code class="font-mono">Kulturum =&gt; Qulturum</code> — exakt felstavning som ska bli rätt ord.</li>
+              <li><code class="font-mono">=Qulturum</code> — bara exakt träff, inga liknande ord.</li>
+              <li>Rader som börjar med <code class="font-mono">#</code> är kommentarer.</li>
+            </ul>
+            <div class="flex gap-2 mt-3">
+              <label class="btn btn-sm cursor-pointer">
+                <span class="material-symbols-outlined">upload</span>
+                <span>Importera .txt</span>
+                <input type="file" id="vocabulary-import" accept=".txt,.json" class="sr-only">
+              </label>
+              <button id="vocabulary-export" class="btn btn-sm">
+                <span class="material-symbols-outlined">download</span>
+                <span>Exportera .txt</span>
+              </button>
+            </div>
+          </div>
+          <div class="mt-4">
+            <p class="text-sm font-semibold">Säkerhetskopiera</p>
+            <p class="hint">Alla ordlistor ligger i filen <span class="font-mono">ordlistor.json</span> i appens datamapp.</p>
+            <p id="vocab-dir" class="hint font-mono break-all mt-1"></p>
+            <button id="vocab-open-dir" class="btn btn-sm mt-2">
+              <span class="material-symbols-outlined">folder_open</span>
+              <span>Öppna mappen</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Lokala modeller -->
+        <section class="section">
+          <h3 class="section-title">Lokala svenska modeller</h3>
+          <p class="hint mb-3">All transkribering och maskering körs 100 % lokalt på datorn. Inget ljud eller text lämnar någonsin datorn.</p>
+          <ul id="model-list" class="flex flex-col gap-2" aria-label="Lokala modeller">
+            <li class="hint">Laddar modellstatus…</li>
+          </ul>
+        </section>
+
+        <!-- Inspelningar -->
+        <section class="section">
+          <h3 class="section-title">Inspelningar</h3>
+          <p class="hint mb-2">Sparas direkt till disk under inspelningen, vilket skyddar mot dataförlust vid krasch.</p>
+          <label for="recording-dir-path" class="text-sm">Mapp</label>
+          <div class="flex gap-2 items-center mt-1">
+            <input type="text" id="recording-dir-path" readonly class="field font-mono text-[13px] truncate" placeholder="Standardmapp" />
+            <button id="btn-browse-recording-dir" class="btn shrink-0">Bläddra…</button>
+          </div>
+          <p id="recording-dir-network" class="hidden hint mt-2" role="note">Mappen ligger på en nätverksdisk. Välj gärna en lokal mapp i stället.</p>
+          <p id="recordings-usage" class="hint mt-2"></p>
+
+          <label class="flex items-start gap-3 cursor-pointer select-none mt-4">
+            <input type="checkbox" id="persist-session-toggle" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5" checked>
+            <span class="text-sm">
+              <span class="font-semibold">Spara transkribering och maskeringsnyckel i sessionsmappen</span>
+              <span class="block hint">Gör att du kan stänga appen och avmaskera AI-svar senare via Öppna → Senaste inspelningar. Allt (ljud, text och nyckel) raderas samtidigt när du tar bort en inspelning. Avmarkera för att hålla allt enbart i arbetsminnet.</span>
+            </span>
+          </label>
+
+          <button id="btn-stereo-mix-help" type="button" class="hidden btn btn-sm mt-4">
+            <span class="material-symbols-outlined">info</span>
+            <span>Hjälp med systemljud</span>
+          </button>
+
+          <div class="mt-6">
+            <h4 class="text-sm font-semibold">Radera alla ljudinspelningar</h4>
+            <p class="hint mb-2">Tar bort alla sessionsmappar (inspelning-…) i inspelningsmappen permanent.</p>
+            <button id="btn-delete-recordings" class="btn btn-sm btn-danger">
+              <span class="material-symbols-outlined">delete</span>
+              <span>Radera alla</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Felsökning -->
+        <section class="section" aria-labelledby="log-title">
+          <h3 id="log-title" class="section-title">Felsökning</h3>
+          <p class="hint mb-2">Loggfilen visar tekniska händelser och eventuella krascher. Den innehåller inget av det som sades eller maskerades.</p>
+          <div class="flex flex-wrap gap-2">
+            <button id="btn-copy-log" type="button" class="btn btn-sm">Kopiera loggen</button>
+            <button id="btn-show-log" type="button" class="btn btn-sm">Öppna loggfil</button>
+            <button id="btn-reveal-log" type="button" class="btn btn-sm">Visa i mapp</button>
+          </div>
+          <p class="hint mt-2">Fil: <span id="log-path" class="font-mono text-[13px] select-all break-all"></span></p>
+        </section>
+
+        <!-- Avancerat -->
+        <section class="section border-b-0">
+          <details id="advanced-settings" class="group">
+            <summary class="flex items-center gap-1 cursor-pointer select-none section-title mb-0">
+              <span class="material-symbols-outlined transition-transform group-open:rotate-90">chevron_right</span>
+              Avancerat
+            </summary>
+            <div class="flex flex-col gap-6 pt-5">
+              <div>
+                <div class="flex items-center justify-between">
+                  <label for="confidence-threshold-slider" class="text-sm font-semibold">Markera osäkra ord</label>
+                  <span id="confidence-threshold-label" class="text-sm font-mono">60%</span>
+                </div>
+                <p class="hint mb-2">Osäkra ord får prickad understrykning i segmentvyn.</p>
+                <input type="range" id="confidence-threshold-slider" min="10" max="99" value="60" step="1" class="w-full accent-primary cursor-pointer">
+              </div>
+
+              <div class="pt-4 border-t border-line">
+                <h4 class="text-sm font-semibold">Nollställ applikationen</h4>
+                <p class="hint mb-2">Återställ Transkerat till nyskick och välj vad du vill ta bort eller behålla.</p>
+                <button id="btn-reset-app" type="button" class="btn btn-sm btn-danger">
+                  <span class="material-symbols-outlined">refresh</span>
+                  <span>Nollställ applikationen…</span>
+                </button>
+              </div>
+            </div>
+          </details>
+        </section>
+      </div>
+
+      <div class="px-6 py-4 border-t border-line shrink-0">
+        <button id="btn-save-settings" class="btn btn-primary w-full">Spara inställningar</button>
+        <p class="text-center text-xs text-muted mt-3">Transkerat <span id="app-version">v0.1.0</span></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nollställ applikationen -->
+  <div id="reset-modal" class="hidden fixed inset-0 bg-black/40 z-[200] flex justify-center items-center"
+    role="dialog" aria-modal="true" aria-labelledby="reset-title">
+    <div class="dialog w-11/12 max-w-md">
+      <div class="p-5">
+        <h3 id="reset-title" class="text-base font-semibold mb-1">Nollställ applikationen</h3>
+        <p class="text-sm text-muted mb-4 leading-relaxed">
+          Välj vad som ska tas bort. Avmarkerade delar behålls som de är.
+        </p>
+        <div class="flex flex-col gap-3">
+          <label class="flex items-start gap-3 cursor-pointer select-none">
+            <input type="checkbox" id="reset-opt-models" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5" checked>
+            <span class="text-sm">
+              <span class="font-semibold">Nedladdade modeller</span>
+              <span id="reset-models-info" class="text-xs text-muted ml-1"></span>
+              <span class="block hint">Tar bort Pianissimo, BERT NER och talarmodeller.</span>
+            </span>
+          </label>
+          <label class="flex items-start gap-3 cursor-pointer select-none">
+            <input type="checkbox" id="reset-opt-settings" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5" checked>
+            <span class="text-sm">
+              <span class="font-semibold">Inställningar och diagnostiklogg</span>
+              <span class="block hint">Återställer mikrofon, tema och tömmer loggfilen.</span>
+            </span>
+          </label>
+          <label class="flex items-start gap-3 cursor-pointer select-none">
+            <input type="checkbox" id="reset-opt-vocab" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5">
+            <span class="text-sm">
+              <span class="font-semibold">Ordlistor</span>
+              <span id="reset-vocab-info" class="text-xs text-muted ml-1"></span>
+              <span class="block hint">Tar bort dina egna ordlistor (<code class="font-mono">ordlistor.json</code>).</span>
+            </span>
+          </label>
+          <label class="flex items-start gap-3 cursor-pointer select-none">
+            <input type="checkbox" id="reset-opt-recordings" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5">
+            <span class="text-sm">
+              <span class="font-semibold">Sparade ljudinspelningar</span>
+              <span id="reset-recordings-info" class="text-xs text-muted ml-1"></span>
+              <span class="block hint">Tar bort alla sessionsmappar (<code class="font-mono">inspelning-…</code>).</span>
+            </span>
+          </label>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button id="reset-cancel" type="button" class="btn" data-autofocus>Avbryt</button>
+        <button id="reset-confirm" type="button" class="btn btn-danger">Nollställ valda</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bekräfta -->
+  <div id="confirm-modal" class="hidden fixed inset-0 bg-black/40 z-[250] flex justify-center items-center"
+    role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="dialog w-11/12 max-w-sm">
+      <div class="p-5">
+        <h3 id="confirm-title" class="text-base font-semibold mb-2">Ny inspelning</h3>
+        <p class="text-sm text-muted leading-relaxed">
+          Du har en transkribering som inte sparats. En ny inspelning kommer att ersätta den.
+        </p>
+      </div>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" class="btn" data-autofocus>Avbryt</button>
+        <button id="confirm-ok" class="btn btn-primary">Fortsätt</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import: fil eller sessionsmapp -->
+  <div id="import-choice-modal" class="hidden fixed inset-0 bg-black/40 z-[200] flex justify-center items-center"
+    role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <div class="dialog w-11/12 max-w-md flex flex-col max-h-[90dvh]">
+      <div class="p-5 pb-4 shrink-0">
+        <h3 id="import-title" class="text-base font-semibold mb-3">Öppna</h3>
+        <button id="import-choice-file" class="btn btn-primary" data-autofocus>
+          <span class="material-symbols-outlined">audio_file</span>
+          <span>Öppna ljud- eller videofil…</span>
+        </button>
+        <p class="hint mt-2">MP3, M4A, WAV, MP4 med flera.</p>
+      </div>
+      <div class="px-5 pb-4 overflow-y-auto min-h-0 border-t border-line pt-4">
+        <h4 id="recent-title" class="text-sm font-semibold mb-1">Senaste inspelningar</h4>
+        <p class="hint mb-3">Inspelningar du gjort med Transkerat.</p>
+        <ul id="recent-list" class="flex flex-col gap-2" aria-labelledby="recent-title"></ul>
+      </div>
+      <div class="dialog-actions shrink-0">
+        <button id="import-choice-cancel" class="btn">Avbryt</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Guide: spela in systemljud -->
+  <div id="stereo-mix-modal" class="hidden fixed inset-0 bg-black/40 z-[300] flex justify-center items-center"
+    role="dialog" aria-modal="true" aria-labelledby="stereo-title">
+    <div class="dialog w-11/12 max-w-lg flex flex-col max-h-[90dvh]">
+      <div class="flex items-center justify-between h-12 px-5 border-b border-line shrink-0">
+        <h2 id="stereo-title" class="text-[15px] font-semibold">Spela in systemljud</h2>
+        <button id="btn-close-stereo-mix" class="btn btn-ghost btn-sm btn-icon-only" aria-label="Stäng guiden">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div class="p-5 overflow-y-auto">
+        <p class="text-sm mb-5 leading-relaxed">
+          För att spela in både din röst och ljudet från datorn (till exempel vid möten i Teams eller Zoom) behöver du aktivera enheten <strong>Stereo Mix</strong> i Windows.
+        </p>
+        <ol class="flex flex-col gap-4 text-sm">
+          <li class="flex gap-3">
+            <span class="step-no">1</span>
+            <div>
+              <p class="font-semibold mb-2">Öppna ljudinställningar</p>
+              <button id="btn-open-win-sound" type="button" class="btn btn-sm">
+                <span class="material-symbols-outlined">open_in_new</span>
+                <span>Öppna Windows inställningar</span>
+              </button>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="step-no">2</span>
+            <div>
+              <p class="font-semibold">Gå till detaljerade inställningar</p>
+              <p class="text-muted">Bläddra längst ned och klicka på <strong>Mer ljudinställningar</strong>.</p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="step-no">3</span>
+            <div>
+              <p class="font-semibold">Visa inaktiverade enheter</p>
+              <p class="text-muted">Gå till fliken <strong>Inspelning</strong>. Högerklicka på en tom yta och kryssa i <strong>Visa inaktiverade enheter</strong>.</p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="step-no">4</span>
+            <div>
+              <p class="font-semibold">Aktivera Stereo Mix</p>
+              <p class="text-muted">Högerklicka på <strong>Stereo Mix</strong> i listan och välj <strong>Aktivera</strong>.</p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="step-no">5</span>
+            <div>
+              <p class="font-semibold">Sätt som standardenhet</p>
+              <p class="text-muted">Högerklicka på <strong>Stereo Mix</strong> igen och välj <strong>Ange som standardenhet</strong>.</p>
+            </div>
+          </li>
+        </ol>
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-close-stereo-mix-ok" class="btn btn-primary" data-autofocus>Jag förstår</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,914 @@
+//! Sessionsmappar, inspelningsfiler, import/återställning och diskinfo.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use serde::Serialize;
+use sysinfo::Disks;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
+
+use crate::audio;
+use crate::types::*;
+use crate::{log_line, AppState};
+
+/// Returnerar sökvägen till senaste recording.wav (om någon). Används av JS i WASAPI-flödet
+/// där pendingRecording.filePath är null — då frågar JS Rust om sökvägen efter stop.
+#[tauri::command]
+pub(crate) fn get_recording_path(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    state.inner().audio_recorder.lock()
+        .map_err(|e| format!("Recorder-lås: {e}"))?
+        .recording_path.lock()
+        .map_err(|e| format!("Path-lås: {e}"))?
+        .clone()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "Ingen aktiv inspelning".to_string())
+}
+
+/// Rensar ett användarangivet sessionsnamn så det duger som mappnamn på Windows.
+/// Otillåtna tecken blir bindestreck; längden kapas. Tom sträng → None.
+pub(crate) fn sanitize_session_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| match c {
+            // Reserverade i Windows-filnamn, plus path-separatorer
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    // Kollapsa upprepade bindestreck/mellanslag och trimma kanterna
+    let mut out = String::with_capacity(cleaned.len());
+    let mut prev_sep = false;
+    for c in cleaned.chars() {
+        let is_sep = c == '-' || c == ' ';
+        if is_sep {
+            if !prev_sep && !out.is_empty() { out.push('-'); }
+            prev_sep = true;
+        } else {
+            out.push(c);
+            prev_sep = false;
+        }
+    }
+    let out = out.trim_matches('-').chars().take(40).collect::<String>();
+    let out = out.trim_matches('-').to_string();
+    // Windows tillåter inte mappnamn som slutar på punkt
+    let out = out.trim_end_matches('.').to_string();
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Döper om den senaste sessionsmappen genom att lägga till ett namn efter
+/// tidsstämpeln: `inspelning-20260903-142233-ledningsgrupp`.
+/// Tidsstämpeln behålls som prefix så sortering och datumparsning fortsätter fungera.
+/// Uppdaterar recording_path så efterföljande uppspelning/transkribering hittar filen.
+#[tauri::command]
+pub(crate) fn rename_session(state: tauri::State<'_, AppState>, name: String) -> Result<String, String> {
+    let recorder = state.inner().audio_recorder.lock()
+        .map_err(|e| format!("Recorder-lås: {e}"))?;
+    let mut path_guard = recorder.recording_path.lock()
+        .map_err(|e| format!("Path-lås: {e}"))?;
+    let current = path_guard.clone()
+        .ok_or_else(|| "Ingen inspelning att döpa om".to_string())?;
+
+    let Some(clean) = sanitize_session_name(&name) else {
+        // Inget namn angivet — behåll mappen som den är.
+        return Ok(current.to_string_lossy().into_owned());
+    };
+
+    let session_dir = current.parent()
+        .ok_or_else(|| "Kunde inte hitta sessionsmappen".to_string())?;
+    let old_name = session_dir.file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Ogiltigt mappnamn".to_string())?;
+    let parent = session_dir.parent()
+        .ok_or_else(|| "Kunde inte hitta överordnad mapp".to_string())?;
+
+    // Bygg nytt namn: behåll allt fram till ev. tidigare suffix.
+    let new_name = format!("{old_name}-{clean}");
+    let new_dir = parent.join(&new_name);
+    if new_dir.exists() {
+        return Err(format!("Det finns redan en mapp som heter {new_name}"));
+    }
+
+    std::fs::rename(session_dir, &new_dir)
+        .map_err(|e| format!("Kunde inte döpa om mappen: {e}"))?;
+
+    let file_name = current.file_name()
+        .ok_or_else(|| "Ogiltigt filnamn".to_string())?;
+    let new_path = new_dir.join(file_name);
+    *path_guard = Some(new_path.clone());
+    log_line(&format!("rename_session: {} → {}", old_name, new_name));
+    Ok(new_path.to_string_lossy().into_owned())
+}
+
+
+#[tauri::command]
+pub(crate) async fn save_audio_file(app_handle: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    use tauri_plugin_dialog::FilePath;
+
+    // Streaming-flödet: hämta sökvägen till sessionsmappens recording.wav
+    let src = state.inner().audio_recorder.lock().unwrap()
+        .recording_path.lock().unwrap().clone()
+        .ok_or_else(|| "Ingen inspelning att spara".to_string())?;
+
+    if !src.exists() {
+        return Err("Inspelningsfilen saknas på disk".to_string());
+    }
+
+    let file_path = app_handle.dialog()
+        .file()
+        .set_title("Spara som ny ljudfil")
+        .set_file_name("inspelning.wav")
+        .add_filter("WAV-fil", &["wav"])
+        .blocking_save_file();
+
+    match file_path {
+        Some(path) => {
+            let dest = match path {
+                FilePath::Path(p) => p,
+                _ => return Err("Ogiltigt filformat".to_string()),
+            };
+            std::fs::copy(&src, &dest)
+                .map_err(|e| format!("Kunde inte spara filen: {e}"))?;
+            Ok(())
+        },
+        None => Err("cancelled".to_string()),
+    }
+}
+
+/// Vad som ska göras med en sessionsmapp för att få fram en spelbar `recording.wav`.
+#[derive(Debug, PartialEq)]
+enum SessionPlan {
+    /// Färdig, redan mixad inspelning — öppna direkt.
+    Ready(PathBuf),
+    /// Råspår finns (avbruten inspelning): laga huvuden och mixa.
+    Mix { mic: Option<PathBuf>, lb: Option<PathBuf>, comms: Option<PathBuf> },
+}
+
+fn non_empty_file(p: &std::path::Path) -> bool {
+    p.is_file() && fs::metadata(p).map(|m| m.len() > 44).unwrap_or(false)
+}
+
+fn plan_session(dir: &std::path::Path) -> Result<SessionPlan, String> {
+    let pick = |name: &str| {
+        let p = dir.join(name);
+        if non_empty_file(&p) { Some(p) } else { None }
+    };
+    let (mic, lb, comms) = (pick("mic.wav"), pick("lb_console.wav"), pick("lb_comms.wav"));
+    let ready = pick("recording.wav");
+    if mic.is_some() || lb.is_some() || comms.is_some() {
+        // Råspår kvar = avbruten inspelning (en färdig fil kan vara ofullständig): mixa om.
+        return Ok(SessionPlan::Mix { mic, lb, comms });
+    }
+    if let Some(r) = ready {
+        // Normalfallet: råspåren raderades efter mixningen, bara recording.wav finns.
+        return Ok(SessionPlan::Ready(r));
+    }
+    Err("Hittade ingen inspelning i mappen (varken recording.wav eller råspår).".to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn recover_session(
+    state: tauri::State<'_, AppState>,
+    session_dir: String,
+) -> Result<String, String> {
+    let dir = PathBuf::from(&session_dir);
+    if !dir.is_dir() {
+        return Err("Vald mapp existerar inte".to_string());
+    }
+    let recording = match plan_session(&dir)? {
+        SessionPlan::Ready(path) => path,
+        SessionPlan::Mix { mic, lb, comms } => {
+            for p in [&mic, &lb, &comms].into_iter().flatten() {
+                audio::repair_wav_header(p)?;
+            }
+            let recording = dir.join("recording.wav");
+            audio::mix_session_to_wav(mic.as_deref(), lb.as_deref(), comms.as_deref(), &recording)?;
+            recording
+        }
+    };
+    // Sätt recording_path så save_audio_file kan användas direkt
+    if let Ok(rec) = state.inner().audio_recorder.lock() {
+        if let Ok(mut path) = rec.recording_path.lock() {
+            *path = Some(recording.clone());
+        }
+    }
+    Ok(recording.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod session_plan_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("transkribera-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn touch(d: &std::path::Path, f: &str) {
+        fs::write(d.join(f), vec![0u8; 100]).unwrap();
+    }
+
+    #[test]
+    fn fardig_inspelning_oppnas_direkt() {
+        let d = tmp("ready");
+        touch(&d, "recording.wav");
+        assert_eq!(plan_session(&d), Ok(SessionPlan::Ready(d.join("recording.wav"))));
+    }
+
+    #[test]
+    fn avbruten_inspelning_mixas() {
+        let d = tmp("raw");
+        touch(&d, "mic.wav");
+        touch(&d, "lb_console.wav");
+        match plan_session(&d).unwrap() {
+            SessionPlan::Mix { mic, lb, comms } => {
+                assert!(mic.is_some() && lb.is_some() && comms.is_none());
+            }
+            other => panic!("väntade Mix, fick {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rasparer_vinner_over_en_eventuellt_ofullstandig_fil() {
+        let d = tmp("both");
+        touch(&d, "recording.wav");
+        touch(&d, "mic.wav");
+        assert!(matches!(plan_session(&d), Ok(SessionPlan::Mix { .. })));
+    }
+
+    #[test]
+    fn tom_mapp_ger_fel() {
+        let d = tmp("empty");
+        assert!(plan_session(&d).is_err());
+    }
+
+    #[test]
+    fn sparar_och_rensar_transkribering_och_maskeringsnyckel() {
+        let root = std::env::temp_dir().join(format!("transkerat-ws-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("session-20261122-201000-mote");
+        fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_string_lossy().into_owned();
+
+        save_session_transcript(dir_str.clone(), r#"{"version":1,"rawText":"Hej Anna"}"#.into(), "Hej Anna".into()).unwrap();
+        assert!(dir.join("transkribering.json").is_file());
+        assert_eq!(fs::read_to_string(dir.join("transkribering.txt")).unwrap(), "Hej Anna");
+
+        save_session_masking(dir_str.clone(), r#"{"version":1,"preset":"strict"}"#.into(), "Hej [PERSON A]".into()).unwrap();
+        assert!(dir.join("maskering.json").is_file());
+        assert_eq!(fs::read_to_string(dir.join("maskerad.txt")).unwrap(), "Hej [PERSON A]");
+
+        clear_session_masking(dir_str).unwrap();
+        assert!(!dir.join("maskering.json").exists());
+        assert!(!dir.join("maskerad.txt").exists());
+        assert!(dir.join("transkribering.json").is_file());
+
+        // Säkerhetsspärr: vägra skriva till icke-sessionsmapp
+        let bad = root.join("vanlig-mapp");
+        fs::create_dir_all(&bad).unwrap();
+        assert!(save_session_masking(bad.to_string_lossy().into_owned(), "{}".into(), "".into()).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// Kontrollerar att `dir` går att skapa och skriva till (t.ex. ej `C:\Program Files\`).
+fn is_dir_writable(dir: &std::path::Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".write-test-{}", std::process::id()));
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Default-mapp för inspelningar = mappen där .exe ligger / Transkribera-Inspelningar.
+/// På företagsdatorer är Documents ofta GP-redirected till UNC-nätverksdisk, så
+/// Documents fungerar dåligt. Mappen där .exe körs ifrån är vanligen lokal SSD
+/// (Downloads för portable .exe, %LOCALAPPDATA% för NSIS).
+/// Om .exe-mappen är skrivskyddad (t.ex. MSI-installation i C:\Program Files\) faller vi
+/// tillbaka till %LOCALAPPDATA%\com.patriksvensk.transcrptr\Transkribera-Inspelningar.
+/// Ligger exe:n på en nätverksdisk (t.ex. ett skrivbord som omdirigerats till `\\server\…`)
+/// används den lokala mappen i stället: inspelning direkt till nätverket blir långsam och kan
+/// avbrytas om anslutningen försvinner.
+pub(crate) fn default_recording_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(exe_dir) = exe_dir() {
+        let candidate = exe_dir.join("Transkerat-Inspelningar");
+        if !is_network_path(&exe_dir) && is_dir_writable(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    let base = app_handle.path().app_local_data_dir()
+        .map_err(|e| format!("Kunde inte hämta app_local_data_dir: {e}"))?;
+    Ok(base.join("Transkerat-Inspelningar"))
+}
+
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+}
+
+/// UNC-sökväg (`\\server\share`, även `\\?\UNC\…`). Ren strängkontroll, testbar på alla plattformar.
+fn is_unc(path: &str) -> bool {
+    let p = path.replace('/', "\\");
+    if let Some(rest) = p.strip_prefix(r"\\?\") {
+        return rest.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("UNC\\"));
+    }
+    p.starts_with(r"\\") && !p.starts_with(r"\\.\")
+}
+
+/// Nätverkssökväg: UNC, eller (Windows) en enhetsbokstav som är en mappad nätverksenhet.
+pub(crate) fn is_network_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    if is_unc(&s) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let b = s.as_bytes();
+        let b = if s.starts_with(r"\\?\") { &b[4..] } else { b };
+        if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetDriveTypeW(root: *const u16) -> u32;
+            }
+            let root: Vec<u16> = [b[0] as u16, b':' as u16, b'\\' as u16, 0].to_vec();
+            const DRIVE_REMOTE: u32 = 4;
+            return unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE;
+        }
+    }
+    false
+}
+
+/// Öppnar en inspelningsmapp (`inspelning-…`) i Utforskaren. Bara riktiga sessionsmappar
+/// tillåts, så gränssnittet kan inte öppna godtyckliga sökvägar.
+#[tauri::command]
+pub(crate) fn open_session_folder(app_handle: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let p = PathBuf::from(&path);
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !p.is_dir() || !is_session_folder(&name) {
+        return Err("Inte en inspelningsmapp.".to_string());
+    }
+    app_handle.opener().open_path(path, None::<&str>).map_err(|e| format!("Kunde inte öppna mappen: {e}"))
+}
+
+/// För varningen i inställningarna: ligger den valda mappen på nätverket?
+#[tauri::command]
+pub(crate) fn is_network_folder(path: String) -> bool {
+    is_network_path(Path::new(&path))
+}
+
+/// Den gamla standardmappen bredvid exe:n, om exe:n ligger på nätverket och mappen redan har
+/// inspelningar. Gränssnittet berättar då att nya inspelningar hamnar lokalt.
+#[tauri::command]
+pub(crate) fn legacy_network_recording_dir() -> Option<String> {
+    let dir = exe_dir()?;
+    if !is_network_path(&dir) {
+        return None;
+    }
+    let old = dir.join("Transkribera-Inspelningar");
+    let has_sessions = fs::read_dir(&old).ok()?.flatten().any(|e| {
+        e.path().is_dir() && is_session_folder(&e.file_name().to_string_lossy())
+    });
+    has_sessions.then(|| old.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub(crate) async fn get_default_recording_dir(app_handle: AppHandle) -> Result<String, String> {
+    let dir = default_recording_dir(&app_handle)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Kunde inte skapa standardmapp: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+pub(crate) fn get_dir_size(path: &PathBuf) -> u64 {
+    let mut size = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            // F5: undvik panik vid TOCTOU/behörighetsfel — hoppa över filer vi inte kan läsa.
+            let Ok(metadata) = entry.metadata() else { continue; };
+            if metadata.is_dir() {
+                size += get_dir_size(&entry.path());
+            } else {
+                size += metadata.len();
+            }
+        }
+    }
+    size
+}
+
+pub(crate) fn is_session_folder(name: &str) -> bool {
+    name.starts_with("inspelning-") || name.starts_with("recording-") || name.starts_with("session-")
+}
+
+/// En tidigare inspelning eller arbetsession i inspelningsmappen (för listan "Senaste inspelningar").
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordingInfo {
+    pub(crate) path: String,
+    /// Namnet användaren gav inspelningen, annars tomt.
+    pub(crate) label: String,
+    /// Lokal tid, "2026-11-06T13:43:18" (läses av `new Date(...)` som lokal tid).
+    pub(crate) started: String,
+    /// recording.wav finns och kan öppnas direkt.
+    pub(crate) has_ready: bool,
+    /// Råspår finns men ingen färdig recording.wav — avbruten inspelning som kan återställas.
+    pub(crate) recoverable: bool,
+    /// Sparad transkribering (transkribering.json) finns i sessionsmappen.
+    pub(crate) has_transcript: bool,
+    /// Sparad maskering och översättningstabell (maskering.json) finns i sessionsmappen.
+    pub(crate) has_masking: bool,
+    pub(crate) size_bytes: u64,
+}
+
+/// Tolkar `inspelning-20260906-134318[-namn]` / `session-20260906-134318[-namn]` → ("2026-09-06T13:43:18", "namn").
+fn parse_session_name(name: &str) -> Option<(String, String)> {
+    let rest = name
+        .strip_prefix("inspelning-")
+        .or_else(|| name.strip_prefix("recording-"))
+        .or_else(|| name.strip_prefix("session-"))?;
+    let mut it = rest.splitn(3, '-');
+    let (d, t) = (it.next()?, it.next()?);
+    if d.len() != 8 || t.len() != 6 || !d.bytes().all(|b| b.is_ascii_digit()) || !t.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let iso = format!("{}-{}-{}T{}:{}:{}", &d[0..4], &d[4..6], &d[6..8], &t[0..2], &t[2..4], &t[4..6]);
+    Some((iso, it.next().unwrap_or("").to_string()))
+}
+
+/// Listar tidigare inspelningar och arbetssessioner (nyast först, högst 30).
+#[tauri::command]
+pub(crate) async fn list_recordings(
+    app_handle: AppHandle,
+    recording_dir: Option<String>,
+) -> Result<Vec<RecordingInfo>, String> {
+    let base = match recording_dir.as_deref() {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => default_recording_dir(&app_handle)?,
+    };
+    let Ok(rd) = fs::read_dir(&base) else { return Ok(vec![]) };
+    let mut out: Vec<RecordingInfo> = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !p.is_dir() || !is_session_folder(&name) {
+            continue;
+        }
+        let has_ready = non_empty_file(&p.join("recording.wav"));
+        let has_parts = ["mic.wav", "lb_console.wav", "lb_comms.wav"].iter().any(|f| non_empty_file(&p.join(f)));
+        let has_transcript = p.join("transkribering.json").is_file();
+        let has_masking = p.join("maskering.json").is_file();
+        if !has_ready && !has_parts && !has_transcript && !has_masking {
+            continue;
+        }
+        let (started, label) = parse_session_name(&name).unwrap_or_else(|| {
+            let t = entry.metadata().and_then(|m| m.modified()).ok()
+                .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%dT%H:%M:%S").to_string())
+                .unwrap_or_default();
+            (t, name.clone())
+        });
+        out.push(RecordingInfo {
+            path: p.to_string_lossy().into_owned(),
+            label,
+            started,
+            has_ready,
+            recoverable: !has_ready && has_parts,
+            has_transcript,
+            has_masking,
+            size_bytes: get_dir_size(&p),
+        });
+    }
+    out.sort_by(|a, b| b.started.cmp(&a.started));
+    out.truncate(30);
+    Ok(out)
+}
+
+// ── Sparad arbetsyta i sessionsmappen (transkribering + maskerad text + nyckel) ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionWorkspace {
+    pub(crate) session_dir: String,
+    pub(crate) transcript_json: Option<String>,
+    pub(crate) masking_json: Option<String>,
+    pub(crate) audio_path: Option<String>,
+}
+
+fn validate_session_dir(dir: &Path) -> Result<(), String> {
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Ogiltig sessionsmapp".to_string())?;
+    if !is_session_folder(name) {
+        return Err(format!("Säkerhetsspärr: {name} är inte en giltig sessionsmapp."));
+    }
+    if !dir.is_dir() {
+        return Err("Sessionsmappen finns inte på disk.".to_string());
+    }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content.as_bytes()).map_err(|e| format!("Kunde inte skriva {}: {e}", path.display()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Kunde inte spara {}: {e}", path.display())
+    })
+}
+
+/// Returnerar befintlig sessionsmapp (om `audio_path` ligger i en sådan) eller skapar en ny
+/// lokal `session-YYYYMMDD-HHMMSS[-etikett]` i inspelningsmappen. Skriver aldrig bredvid externa filer.
+#[tauri::command]
+pub(crate) fn ensure_work_session(
+    app_handle: AppHandle,
+    recording_dir: Option<String>,
+    audio_path: Option<String>,
+    label: Option<String>,
+) -> Result<String, String> {
+    if let Some(ap) = audio_path.as_deref().filter(|s| !s.is_empty()) {
+        let p = Path::new(ap);
+        if let Some(parent) = p.parent() {
+            if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+                if is_session_folder(name) && parent.is_dir() {
+                    return Ok(parent.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+
+    let base = match recording_dir.as_deref() {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => default_recording_dir(&app_handle)?,
+    };
+    fs::create_dir_all(&base).map_err(|e| format!("Kunde inte skapa inspelningsmapp: {e}"))?;
+
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let suffix = label
+        .as_deref()
+        .and_then(sanitize_session_name)
+        .map(|s| format!("-{s}"))
+        .unwrap_or_default();
+
+    let mut dir = base.join(format!("session-{stamp}{suffix}"));
+    let mut n = 2u32;
+    while dir.exists() {
+        dir = base.join(format!("session-{stamp}{suffix}-{n}"));
+        n += 1;
+    }
+    fs::create_dir_all(&dir).map_err(|e| format!("Kunde inte skapa sessionsmapp: {e}"))?;
+    log_line(&format!("ensure_work_session: skapade {}", dir.display()));
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub(crate) fn save_session_transcript(
+    session_dir: String,
+    data_json: String,
+    plain_text: String,
+) -> Result<(), String> {
+    let dir = Path::new(&session_dir);
+    validate_session_dir(dir)?;
+    atomic_write(&dir.join("transkribering.json"), &data_json)?;
+    atomic_write(&dir.join("transkribering.txt"), &plain_text)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn save_session_masking(
+    session_dir: String,
+    masking_json: String,
+    masked_text: String,
+) -> Result<(), String> {
+    let dir = Path::new(&session_dir);
+    validate_session_dir(dir)?;
+    atomic_write(&dir.join("maskering.json"), &masking_json)?;
+    atomic_write(&dir.join("maskerad.txt"), &masked_text)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn clear_session_masking(session_dir: String) -> Result<(), String> {
+    let dir = Path::new(&session_dir);
+    validate_session_dir(dir)?;
+    for f in ["maskering.json", "maskerad.txt"] {
+        let p = dir.join(f);
+        if p.exists() {
+            fs::remove_file(&p).map_err(|e| format!("Kunde inte ta bort {f}: {e}"))?;
+        }
+    }
+    log_line(&format!("clear_session_masking: rensade nyckel i {}", dir.display()));
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn load_session_workspace(
+    state: tauri::State<'_, AppState>,
+    session_dir: String,
+) -> Result<SessionWorkspace, String> {
+    let dir = Path::new(&session_dir);
+    validate_session_dir(dir)?;
+
+    let transcript_json = fs::read_to_string(dir.join("transkribering.json")).ok();
+    let masking_json = fs::read_to_string(dir.join("maskering.json")).ok();
+
+    let mut audio_path: Option<String> = None;
+    let rec_wav = dir.join("recording.wav");
+    if non_empty_file(&rec_wav) {
+        audio_path = Some(rec_wav.to_string_lossy().into_owned());
+        if let Ok(rec) = state.inner().audio_recorder.lock() {
+            if let Ok(mut path) = rec.recording_path.lock() {
+                *path = Some(rec_wav);
+            }
+        }
+    } else if let Some(ref tj) = transcript_json {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(tj) {
+            if let Some(ap) = v.get("audioPath").and_then(|x| x.as_str()) {
+                if Path::new(ap).is_file() {
+                    audio_path = Some(ap.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(SessionWorkspace {
+        session_dir,
+        transcript_json,
+        masking_json,
+        audio_path,
+    })
+}
+
+#[cfg(test)]
+mod recordings_tests {
+    use super::parse_session_name;
+
+    #[test]
+    fn tolkar_mappnamn() {
+        assert_eq!(
+            parse_session_name("inspelning-20261106-134318"),
+            Some(("2026-11-06T13:43:18".into(), "".into()))
+        );
+        assert_eq!(
+            parse_session_name("inspelning-20260903-142233-ledningsgrupp-vecka-3"),
+            Some(("2026-09-03T14:22:33".into(), "ledningsgrupp-vecka-3".into()))
+        );
+        assert_eq!(parse_session_name("annat"), None);
+        assert_eq!(parse_session_name("inspelning-xx-yy"), None);
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct RecordingsSummary {
+    count: usize,
+    total_bytes: u64,
+}
+
+/// Räknar sessionsmappar (inspelning-* / recording-*) i en mapp och deras totala storlek.
+/// Används av settings (diskanvändning) och som förhandsbesked före radering.
+#[tauri::command]
+pub(crate) async fn count_recordings(dir: String) -> Result<RecordingsSummary, String> {
+    let base = PathBuf::from(&dir);
+    if !base.is_dir() {
+        return Ok(RecordingsSummary { count: 0, total_bytes: 0 });
+    }
+    let mut count = 0;
+    let mut total = 0u64;
+    for entry in fs::read_dir(&base).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if is_session_folder(name) {
+                    count += 1;
+                    total += get_dir_size(&path);
+                }
+            }
+        }
+    }
+    Ok(RecordingsSummary { count, total_bytes: total })
+}
+
+/// Raderar ALLA sessionsmappar (inspelning-* / recording-*) i den givna mappen.
+/// Säkerhet: rör ENDAST mappar med rätt prefix — aldrig själva mappen eller andra
+/// filer (recordingDir kan peka på t.ex. Downloads). Returnerar antal raderade.
+#[tauri::command]
+pub(crate) async fn delete_all_recordings(dir: String) -> Result<usize, String> {
+    let base = PathBuf::from(&dir);
+    if !base.is_dir() {
+        return Err("Inspelningsmappen finns inte".to_string());
+    }
+    let mut deleted = 0;
+    for entry in fs::read_dir(&base).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if is_session_folder(name) {
+                    fs::remove_dir_all(&path)
+                        .map_err(|e| format!("Kunde inte radera {}: {e}", path.display()))?;
+                    deleted += 1;
+                }
+            }
+        }
+    }
+    Ok(deleted)
+}
+
+/// Kontrollerar att `path` är en inspelningsmapp som ligger DIREKT i `base`.
+/// Skyddar mot att något annat än en inspelning raderas (t.ex. `..` eller en annan mapp).
+fn validate_recording_path(base: &Path, path: &Path) -> Result<PathBuf, String> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !is_session_folder(name) || !path.is_dir() {
+        return Err("Det här är ingen inspelningsmapp.".to_string());
+    }
+    let base_c = base.canonicalize().map_err(|e| format!("Inspelningsmappen hittas inte: {e}"))?;
+    let path_c = path.canonicalize().map_err(|e| format!("Inspelningen hittas inte: {e}"))?;
+    if path_c.parent() != Some(base_c.as_path()) {
+        return Err("Inspelningen ligger inte i inspelningsmappen.".to_string());
+    }
+    Ok(path_c)
+}
+
+/// Raderar en enskild inspelning (hela mappen: ljudfiler och transkript).
+#[tauri::command]
+pub(crate) async fn delete_recording(
+    app_handle: AppHandle,
+    recording_dir: Option<String>,
+    path: String,
+) -> Result<(), String> {
+    let base = match recording_dir.as_deref() {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => default_recording_dir(&app_handle)?,
+    };
+    let target = validate_recording_path(&base, Path::new(&path))?;
+    fs::remove_dir_all(&target).map_err(|e| format!("Kunde inte radera inspelningen: {e}"))?;
+    log_line(&format!("delete_recording: raderade {}", target.display()));
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn get_disk_info(app_handle: AppHandle) -> Result<DiskInfo, String> {
+    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let models_dir = app_data_dir.join("models");
+    let models_dir_size = get_dir_size(&models_dir);
+
+    let disks = Disks::new_with_refreshed_list();
+    
+    // Find the disk where app data is located
+    // For simplicity on macOS/Windows, we look for the disk that contains the app data dir.
+    // On Windows it might be C:, on macOS typically /
+    let disk = disks.iter().find(|d| {
+        app_data_dir.starts_with(d.mount_point())
+    }).or_else(|| disks.get(0));
+
+    if let Some(d) = disk {
+        Ok(DiskInfo {
+            total_space: d.total_space(),
+            available_space: d.available_space(),
+            models_dir_size,
+        })
+    } else {
+        Err("Could not get disk info".to_string())
+    }
+}
+
+/// Nollställer valda delar av applikationen.
+/// På Windows kan `models/runtime/onnxruntime-*.dll` vara låst i minnet om Pianissimo redan
+/// körts i samma session — vi raderar därför varje underkatalog/fil i `models/` var för sig
+/// och ignorerar ev. lås på `runtime/`.
+#[tauri::command]
+pub(crate) async fn reset_application(
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+    delete_models: bool,
+    delete_vocab: bool,
+    delete_recordings: bool,
+    delete_logs: bool,
+    recording_dir: Option<String>,
+) -> Result<(), String> {
+    if let Ok(rec) = state.inner().audio_recorder.lock() {
+        if let Ok(mut p) = rec.recording_path.lock() {
+            *p = None;
+        }
+    }
+
+    let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    if delete_models {
+        let models_dir = app_data_dir.join("models");
+        if let Ok(entries) = fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if name == "runtime" {
+                        let _ = fs::remove_dir_all(&path);
+                    } else {
+                        fs::remove_dir_all(&path)
+                            .map_err(|e| format!("Kunde inte radera modellen {name}: {e}"))?;
+                    }
+                } else {
+                    fs::remove_file(&path)
+                        .map_err(|e| format!("Kunde inte radera modellfilen {name}: {e}"))?;
+                }
+            }
+        }
+    }
+
+    if delete_vocab {
+        let _ = fs::remove_file(app_data_dir.join("ordlistor.json"));
+        let _ = fs::remove_file(app_data_dir.join("ordlistor.json.skadad"));
+        let _ = fs::remove_file(app_data_dir.join("ordlistor.json.tmp"));
+    }
+
+    if delete_recordings {
+        let base = match recording_dir.as_deref() {
+            Some(p) if !p.is_empty() => PathBuf::from(p),
+            _ => default_recording_dir(&app_handle)?,
+        };
+        if base.is_dir() {
+            let _ = delete_all_recordings(base.to_string_lossy().into_owned()).await?;
+        }
+    }
+
+    if delete_logs {
+        crate::logging::clear_logs(&app_handle);
+    } else {
+        log_line(&format!(
+            "reset_application: models={delete_models}, vocab={delete_vocab}, recordings={delete_recordings}"
+        ));
+    }
+
+    Ok(())
+}
+
+
+#[cfg(test)]
+mod delete_recording_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("transkribera-del-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn godkanner_inspelning_direkt_i_mappen() {
+        let base = tmp("ok");
+        let rec = base.join("inspelning-20261112-145058-test");
+        fs::create_dir_all(&rec).unwrap();
+        assert!(validate_recording_path(&base, &rec).is_ok());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nekar_andra_mappar_och_andra_platser() {
+        let base = tmp("nej");
+        let other = base.join("Dokument");
+        fs::create_dir_all(&other).unwrap();
+        assert!(validate_recording_path(&base, &other).is_err(), "fel prefix");
+        assert!(validate_recording_path(&base, &base).is_err(), "själva basmappen");
+
+        // Rätt namn men i en undermapp, eller i en helt annan mapp.
+        let nested = other.join("inspelning-20261112-145058");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(validate_recording_path(&base, &nested).is_err(), "undermapp");
+        let elsewhere = tmp("annan");
+        let rec2 = elsewhere.join("inspelning-20261112-145058");
+        fs::create_dir_all(&rec2).unwrap();
+        assert!(validate_recording_path(&base, &rec2).is_err(), "annan bas");
+        // Sökväg med .. som pekar ut ur basmappen
+        let sneaky = base.join("inspelning-20261112-145058").join("..").join("Dokument");
+        assert!(validate_recording_path(&base, &sneaky).is_err());
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+}
+
+#[cfg(test)]
+mod network_path_tests {
+    use super::is_unc;
+
+    #[test]
+    fn unc_kanns_igen() {
+        assert!(is_unc(r"\\jkp.ltjkpg.se\gem\Home03\lunte\Skrivbord"));
+        assert!(is_unc(r"\\?\UNC\server\share\mapp"));
+        assert!(is_unc("//server/share"));
+    }
+
+    #[test]
+    fn lokala_sokvagar_ar_inte_unc() {
+        assert!(!is_unc(r"C:\Users\lunte\Downloads"));
+        assert!(!is_unc(r"\\?\C:\Users\lunte"));
+        assert!(!is_unc(r"\\.\pipe\x"));
+        assert!(!is_unc("/Users/patrik"));
+    }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "transkerat",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "build:css": "tailwindcss -i src/input.css -o src/app.css --minify",
+    "watch:css": "tailwindcss -i src/input.css -o src/app.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.11",
+    "@tauri-apps/cli": "^2",
+    "tailwindcss": "^3.4.19"
+  }
+}
