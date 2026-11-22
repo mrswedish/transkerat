@@ -13,14 +13,29 @@ All taligenkänning, namn- och rollmaskering samt återställning av AI-svar ske
 ## Så fungerar det — tre steg från möte till färdig sammanfattning
 
 ### 1. Transkribering (Pianissimo · svenska)
-Spela in möten direkt i appen (mikrofon + systemljud på Windows) eller öppna en ljud- eller videofil (MP3, M4A, WAV, MP4 m.fl.).
+Spela in möten direkt i appen (på Windows) eller öppna en ljud- eller videofil (MP3, M4A, WAV, MP4 m.fl.).
 
 - **Endast svenska Pianissimo** — körs snabbt på vanlig processor utan krav på grafikkort.
-- **Talaridentifiering (valfritt)** — skiljer på vem som säger vad, med möjlighet att ge talarna egna namn.
-- **Personliga ordlistor** — rättar automatiskt facktermer och namn som ofta hörs fel (t.ex. `Kulturum => Qulturum`).
+- **Talaridentifiering (valfritt)** — skiljer automatiskt på olika röster som **Talare 1**, **Talare 2** osv. (du kan även klicka på en talaretikett för att själv döpa om den vid behov).
+- **Personliga ordlistor** — rättar automatiskt facktermer och interna begrepp som ofta hörs fel (t.ex. `kund portalen => Kundportalen`).
 - **Synkad ljudspelare** — klicka på valfri tidsstämpel för att lyssna och korrigera texten direkt.
 
 ![Steg 1: Transkribering i Transkerat](docs/screenshots/01-transkribering.png)
+
+---
+
+## Skillnad mellan Windows (PC) och macOS
+
+| Funktion | Windows (PC) | macOS (Apple Silicon) |
+|---|---|---|
+| **Spela in digitala möten (systemljud + mikrofon)** — t.ex. Teams, Pexip, Zoom, Google Meet | ✅ Ja (WASAPI loopback) | ❌ Nej |
+| **Spela in mikrofon direkt i appen** | ✅ Ja | ❌ Nej |
+| **Öppna och transkribera ljud-/videofiler** (MP3, M4A, WAV, MP4 m.fl.) | ✅ Ja | ✅ Ja |
+| **Talaridentifiering (`Talare 1`, `Talare 2` …) & personliga ordlistor** | ✅ Ja | ✅ Ja |
+| **Maskera (AI-säker & Strikt inkl. Roll/Titel) & Avmaskera AI-svar** | ✅ Ja | ✅ Ja |
+| **Lokal sessionslagring av transkript & maskeringsnyckel** | ✅ Ja | ✅ Ja |
+
+> På **Windows (PC)** kryssar du bara i **Spela in systemljud** i verktygsraden för att få med både din egen mikrofon och övriga deltagare i digitala möten (Teams, Pexip, Zoom m.fl.). På **macOS** öppnar du i stället en inspelad ljud- eller videofil (eller klistrar in text direkt).
 
 ---
 
@@ -29,7 +44,7 @@ Klicka på **Maskera text →** för att pseudonymisera transkriptet lokalt inna
 
 - **Två färdiga profiler:**
   - **AI-säker** — maskerar personnummer/samordningsnummer, e-post, telefonnummer, org.nummer, konto/giro, kortnummer, hemligheter/nycklar samt personer, organisationer, platser och övrigt.
-  - **Strikt (inkl. Roll/Titel)** — maskerar allt i *AI-säker* plus svenska yrkesroller och befattningar (`[ROLL A]`, t.ex. *verksamhetschefen*, *informationssäkerhetssamordnaren*), IP-adresser, tider och händelser.
+  - **Strikt (inkl. Roll/Titel)** — maskerar allt i *AI-säker* plus svenska yrkesroller och befattningar (`[ROLL A]`, t.ex. *avdelningschefen*, *projektledaren*), IP-adresser, tider och händelser.
 - **Full kontroll i granskningsvyn:**
   - Klicka på valfri markering för att undanta eller återaktivera den.
   - Markera valfri text för att lägga till en manuell maskering.
