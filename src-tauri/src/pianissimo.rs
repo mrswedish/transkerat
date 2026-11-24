@@ -126,7 +126,9 @@ impl Pianissimo {
 
         let mut run_opts = RunOptions::default();
         run_opts.language = Some("sv".to_string());
-        run_opts.timestamps = TimestampKind::Auto;
+        // Begär ordnivå-tidsstämplar så vi kan dela upp i meningssegment (likt v0.1.0),
+        // eftersom transcribe.cpp annars returnerar ett enda stort segment per 90s-block.
+        run_opts.timestamps = TimestampKind::Word;
 
         let mut begin = 0usize;
         while begin < samples.len() {
@@ -143,7 +145,9 @@ impl Pianissimo {
                 .run(slice, &run_opts)
                 .context("Fel vid transkribering i transcribe.cpp")?;
 
-            if !transcript.segments.is_empty() {
+            if !transcript.words.is_empty() {
+                out.extend(self.group_words(&transcript.words, pass_offset_ms));
+            } else if !transcript.segments.is_empty() {
                 for seg in transcript.segments {
                     let text = self.clean_text(&seg.text);
                     if !text.is_empty() {
@@ -154,8 +158,6 @@ impl Pianissimo {
                         });
                     }
                 }
-            } else if !transcript.words.is_empty() {
-                out.extend(self.group_words(&transcript.words, pass_offset_ms));
             } else {
                 let text = self.clean_text(&transcript.text);
                 if !text.is_empty() {

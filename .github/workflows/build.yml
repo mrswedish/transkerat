@@ -85,6 +85,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
@@ -104,8 +109,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Run Rust unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Run Rust unit tests (release, delar byggcache med tauri build)
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows Tauri app
         run: npx tauri build
@@ -139,11 +144,16 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Run Rust unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Run Rust unit tests (release)
+        run: cargo test --release --target aarch64-apple-darwin --manifest-path src-tauri/Cargo.toml
 
       - name: Build macOS Tauri app (Apple Silicon + ad-hoc sign)
         env:
