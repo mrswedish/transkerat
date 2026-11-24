@@ -16,6 +16,7 @@ All taligenkänning, namn- och rollmaskering samt återställning av AI-svar ske
 Spela in möten direkt i appen (på Windows) eller öppna en ljud- eller videofil (MP3, M4A, WAV, MP4 m.fl.).
 
 - **Endast svenska Pianissimo (`transcribe.cpp` / GGUF)** — GPU-accelererad via **Vulkan** på Windows (AMD, NVIDIA och Intel) och **Metal** på macOS (Apple Silicon), med automatisk kraschvakt och CPU-fallback.
+- **Snabb lokal prestanda** — ett 90 minuter långt inspelat möte transkriberas på cirka **6 minuter** (~15× realtid) på en vanlig bärbar PC med 16 GB RAM.
 - **Talaridentifiering (valfritt)** — skiljer automatiskt på olika röster som **Talare 1**, **Talare 2** osv. (du kan även klicka på en talaretikett för att själv döpa om den vid behov).
 - **Personliga ordlistor** — rättar automatiskt facktermer och interna begrepp som ofta hörs fel (t.ex. `kund portalen => Kundportalen`).
 - **Synkad ljudspelare** — klicka på valfri tidsstämpel för att lyssna och korrigera texten direkt.
