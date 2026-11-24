@@ -1,7 +1,7 @@
 [package]
 name = "transkerat"
-version = "0.1.0"
-description = "100% lokal svensk transkribering (Pianissimo) och integritetsmaskering (Maskera)"
+version = "0.2.0"
+description = "100% lokal svensk transkribering (Pianissimo / transcribe.cpp) och integritetsmaskering (Maskera)"
 authors = ["Patrik Svensk"]
 edition = "2021"
 
@@ -29,20 +29,22 @@ symphonia = { version = "0.5", default-features = false, features = [
 num_cpus = "1.16"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1"
-# Gemensam ONNX Runtime för både Pianissimo (svensk taligenkänning) och KBLab Svensk BERT NER (maskering)
+# Maskering Lager 2 (KBLab Svensk BERT NER) via ONNX Runtime
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex", "progressbar"] }
 ndarray = "0.17"
-rustfft = "6.4"
 regex = "1"
 sha2 = "0.10"
-# Talaridentifiering: pyannote community-1-pipelinen i ren Rust (CPU, ingen onnxruntime).
+# Talaridentifiering: pyannote community-1-pipelinen i ren Rust (CPU).
 speakrs = { path = "vendor/speakrs", default-features = false, features = ["cpu"] }
 
+# Svensk taligenkänning (Pianissimo GGUF) via transcribe.cpp (ggml): Metal på macOS, Vulkan på Windows, CPU fallback
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15.3"
+transcribe-cpp = { version = "0.4.2", default-features = false, features = ["metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+transcribe-cpp = { version = "0.4.2", default-features = false, features = ["vulkan"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
@@ -52,6 +54,9 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+transcribe-cpp = { version = "0.4.2", default-features = false }
 
 [profile.dev]
 debug = 1

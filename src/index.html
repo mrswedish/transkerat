@@ -538,6 +538,24 @@
             </summary>
             <div class="flex flex-col gap-6 pt-5">
               <div>
+                <label class="flex items-start gap-3 cursor-pointer select-none">
+                  <input type="checkbox" id="gpu-toggle" class="w-5 h-5 accent-primary cursor-pointer shrink-0 mt-0.5" checked>
+                  <span class="text-sm font-semibold">GPU-acceleration (Vulkan / Metal)
+                    <span class="block hint font-normal">Använder grafikkortet (AMD, NVIDIA, Intel eller Apple Silicon) för snabbare transkribering och lägre CPU-belastning. Stängs av automatiskt om en körning kraschar oväntat.</span>
+                  </span>
+                </label>
+              </div>
+
+              <div>
+                <div class="flex items-center justify-between">
+                  <label for="thread-count-slider" class="text-sm font-semibold">CPU-trådar (vid CPU-läge)</label>
+                  <span id="thread-count-value" class="text-sm font-mono">4</span>
+                </div>
+                <p class="hint mb-2">Styr hur många processortrådar som används när GPU-acceleration är avstängd. Lägre värde ger tystare fläkt och mer CPU kvar till andra program.</p>
+                <input type="range" id="thread-count-slider" min="1" max="16" value="4" step="1" class="w-full accent-primary cursor-pointer">
+              </div>
+
+              <div>
                 <div class="flex items-center justify-between">
                   <label for="confidence-threshold-slider" class="text-sm font-semibold">Markera osäkra ord</label>
                   <span id="confidence-threshold-label" class="text-sm font-mono">60%</span>

@@ -85,6 +85,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Install Ninja
+        run: choco install ninja
+
       - name: Install frontend dependencies
         run: npm install
 

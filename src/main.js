@@ -241,6 +241,8 @@ let estimatedRecordingSize = 0;
 let lastTranscribedPath = null;
 let currentSessionDir = null;
 let persistSessionData = true;
+let useGpu = true;
+let threadCount = 4;
 
 let saveTranscriptTimer = null;
 async function ensureActiveSession(audioPath = null, label = null) {
@@ -307,6 +309,12 @@ function loadSettings() {
   const confThresh = localStorage.getItem("confidenceThreshold");
   const savedPersist = localStorage.getItem("persistSessionData");
   persistSessionData = savedPersist === null ? true : savedPersist === "true";
+  const savedGpu = localStorage.getItem("useGpu");
+  useGpu = savedGpu === null ? true : savedGpu === "true";
+  const savedThreads = parseInt(localStorage.getItem("threadCount") || "4", 10);
+  if (Number.isFinite(savedThreads) && savedThreads >= 1 && savedThreads <= 16) {
+    threadCount = savedThreads;
+  }
 
   if (micId) selectedMicId = micId;
   if (wasapi !== null) wasapiEnabled = wasapi === "true";
@@ -318,6 +326,12 @@ function loadSettings() {
   if (speakersToggle) speakersToggle.checked = identifySpeakers;
   const persistToggle = document.getElementById("persist-session-toggle");
   if (persistToggle) persistToggle.checked = persistSessionData;
+  const gpuToggle = document.getElementById("gpu-toggle");
+  if (gpuToggle) gpuToggle.checked = useGpu;
+  const threadSlider = document.getElementById("thread-count-slider");
+  const threadValue = document.getElementById("thread-count-value");
+  if (threadSlider) threadSlider.value = String(threadCount);
+  if (threadValue) threadValue.textContent = String(threadCount);
 
   syncWasapiVisual();
 
@@ -424,6 +438,14 @@ async function setupEventListeners() {
     if (progressContainer) progressContainer.classList.remove("hidden");
     if (progressBar) progressBar.style.width = `${progress}%`;
     loadingText.innerText = `Transkriberar (Pianissimo)… ${progress}%`;
+  });
+
+  await listen("engine_backend", (event) => {
+    const backend = event.payload;
+    const footerModel = document.getElementById("footer-model");
+    if (footerModel && backend) {
+      footerModel.textContent = `Pianissimo (${backend})`;
+    }
   });
 
   const btnBrowseDir = document.getElementById("btn-browse-recording-dir");
@@ -707,7 +729,7 @@ async function refreshModelList() {
   catch (err) { console.error("Kunde inte ladda modeller:", err); return; }
 
   modelList.innerHTML = "";
-  const approxSizes = { pianissimo: "ca 660 MB", ner: "ca 127 MB", diarization: "ca 33 MB" };
+  const approxSizes = { pianissimo: "ca 740 MB", ner: "ca 127 MB", diarization: "ca 33 MB" };
 
   for (const m of models) {
     const li = document.createElement("li");
@@ -871,17 +893,31 @@ document.getElementById("confidence-threshold-slider")?.addEventListener("input"
   if (label) label.textContent = e.target.value + "%";
 });
 
+document.getElementById("thread-count-slider")?.addEventListener("input", (e) => {
+  const val = parseInt(e.target.value, 10);
+  if (Number.isFinite(val)) {
+    threadCount = Math.max(1, Math.min(16, val));
+    const lbl = document.getElementById("thread-count-value");
+    if (lbl) lbl.textContent = String(threadCount);
+  }
+});
+
 btnSaveSettings.addEventListener("click", async () => {
   const newMicId = selMic ? selMic.value : "default";
   const wasapiToggle = document.getElementById("wasapi-toggle");
   const newWasapi = wasapiToggle ? wasapiToggle.checked : false;
   const persistToggle = document.getElementById("persist-session-toggle");
   const newPersist = persistToggle ? persistToggle.checked : true;
+  const gpuToggle = document.getElementById("gpu-toggle");
+  const newGpu = gpuToggle ? gpuToggle.checked : true;
 
   localStorage.setItem("selectedMicId", newMicId);
   localStorage.setItem("wasapiEnabled", newWasapi.toString());
   localStorage.setItem("persistSessionData", newPersist.toString());
+  localStorage.setItem("useGpu", newGpu.toString());
+  localStorage.setItem("threadCount", String(threadCount));
   persistSessionData = newPersist;
+  useGpu = newGpu;
   await saveVocabNow();
 
   const confSlider = document.getElementById("confidence-threshold-slider");
@@ -1657,6 +1693,8 @@ async function processAudioFile(filePath) {
     const segs = await invoke("transcribe_file", {
       filePath,
       identifySpeakers,
+      useGpu,
+      threadCount,
     });
 
     if (segs && segs.length > 0) {
@@ -2052,7 +2090,17 @@ async function updateNetworkDirHint() {
 async function checkCrashMarker() {
   try {
     const marker = await invoke("take_crash_marker");
-    if (marker) showNotice("Förra transkriberingen avbröts oväntat. Skicka gärna loggen under Inställningar → Felsökning om det händer igen.");
+    if (marker) {
+      if (marker.gpu && useGpu) {
+        useGpu = false;
+        localStorage.setItem("useGpu", "false");
+        const gpuToggle = document.getElementById("gpu-toggle");
+        if (gpuToggle) gpuToggle.checked = false;
+        showNotice("Förra transkriberingen avbröts oväntat. GPU-acceleration har stängts av automatiskt så att Pianissimo kör på processorn i stället. Du kan slå på den igen under Inställningar → Avancerat.");
+      } else {
+        showNotice("Förra transkriberingen avbröts oväntat. Skicka gärna loggen under Inställningar → Felsökning om det händer igen.");
+      }
+    }
   } catch (_) {}
 }
 

@@ -120,13 +120,15 @@ async fn append_mic_chunk(_request: tauri::ipc::Request<'_>) -> Result<(), Strin
     Ok(())
 }
 
-/// Transkribera ljudfil med svenska Pianissimo (100 % lokalt, CPU).
+/// Transkribera ljudfil med svenska Pianissimo via transcribe.cpp (Vulkan/Metal/CPU).
 #[tauri::command]
 async fn transcribe_file(
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
     file_path: String,
     identify_speakers: Option<bool>,
+    use_gpu: Option<bool>,
+    thread_count: Option<u32>,
 ) -> Result<Vec<TranscriptSegment>, String> {
     state.inner().cancel_flag.store(false, Ordering::Relaxed);
     let model_path = models::pianissimo_dir(&app_handle)?;
@@ -135,6 +137,10 @@ async fn transcribe_file(
     }
     let cancel = Arc::clone(&state.inner().cancel_flag);
     let app = app_handle.clone();
+    let gpu_enabled = use_gpu.unwrap_or(true);
+    let threads = thread_count
+        .map(|n| (n as usize).clamp(1, 16))
+        .unwrap_or_else(pianissimo::default_threads);
     let vocab_entries =
         vocabulary::active_entries(&vocabulary::load_store(&app_handle).unwrap_or_default());
 
@@ -151,11 +157,15 @@ async fn transcribe_file(
     let segments = tokio::task::spawn_blocking(move || -> Result<Vec<TranscriptSegment>, String> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<Vec<TranscriptSegment>, String> {
-                let _run_guard = crashguard::RunGuard::start(&app, pianissimo::ENGINE_ID, false);
+                let _run_guard = crashguard::RunGuard::start(&app, pianissimo::ENGINE_ID, gpu_enabled);
                 let mut dec = StreamingDecoder::open(&file_path)?;
-                let mut eng =
-                    pianissimo::Pianissimo::load(&model_path, pianissimo::default_threads())
-                        .map_err(|e| format!("Kunde inte starta Pianissimo: {e}"))?;
+                let mut eng = pianissimo::Pianissimo::load(&model_path, gpu_enabled, threads)
+                    .map_err(|e| format!("Kunde inte starta Pianissimo: {e}"))?;
+                log_line(&format!(
+                    "transcribe_file: Pianissimo laddad (backend={}, use_gpu={gpu_enabled}, threads={threads})",
+                    eng.backend_name()
+                ));
+                let _ = app.emit("engine_backend", eng.backend_name().to_string());
 
                 let emit = |p: i32| {
                     let _ = app.emit(
@@ -533,7 +543,8 @@ pub fn run() {
             logging::read_log,
             append_mic_chunk,
             allow_asset_path,
-            crashguard::take_crash_marker
+            crashguard::take_crash_marker,
+            crashguard::get_gpu_info
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

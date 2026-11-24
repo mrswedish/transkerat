@@ -79,7 +79,7 @@ mod tests {
         let dir = std::env::var("PIANISSIMO_DIR").expect("PIANISSIMO_DIR");
         let audio = std::env::var("TEST_AUDIO").expect("TEST_AUDIO");
         let mut dec = StreamingDecoder::open(&audio).unwrap();
-        let mut eng = crate::pianissimo::Pianissimo::load(std::path::Path::new(&dir), 4).unwrap();
+        let mut eng = crate::pianissimo::Pianissimo::load(std::path::Path::new(&dir), true, 4).unwrap();
         let t0 = std::time::Instant::now();
         let last = std::sync::atomic::AtomicI32::new(-1);
         let segs = run_file(&mut eng, &mut dec, &AtomicBool::new(false), &|p| last.store(p, Ordering::Relaxed)).unwrap();
