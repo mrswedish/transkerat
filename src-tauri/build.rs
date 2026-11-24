@@ -5,8 +5,13 @@ fn main() {
     // /SWAPRUN:NET kopierar hela exe:n till växlingsfilen vid start.
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if os == "windows" && env == "msvc" {
-        println!("cargo:rustc-link-arg-bins=/SWAPRUN:NET");
+    if os == "windows" {
+        if let Ok(sdk) = std::env::var("VULKAN_SDK") {
+            println!("cargo:rustc-link-search=native={sdk}/Lib");
+        }
+        if env == "msvc" {
+            println!("cargo:rustc-link-arg-bins=/SWAPRUN:NET");
+        }
     }
     tauri_build::build()
 }
