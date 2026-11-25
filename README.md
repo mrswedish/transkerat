@@ -63,7 +63,8 @@ Klicka på **Maskera text →** för att pseudonymisera transkriptet lokalt inna
 När din AI-tjänst har sammanfattat mötet eller skrivit ett utkast klistrar du in svaret (som innehåller `[PERSON A]`, `[ROLL A]`, `[ORGANISATION A]` osv.) i steg 3.
 
 - Alla platshållare återställs **omedelbart och lokalt** via sessionens översättningstabell.
-- Kopiera det färdiga, avmaskerade svaret eller spara det som textfil.
+- **Snygg formatering utan rå Markdown:** Rubriker, punktlistor, fetstil och **tabeller** renderas direkt som ett rent dokument i stället för råa `**`-, `###`- och `|---|`-tecken.
+- **Kopiera avmaskerat** lägger både **rik formaterad HTML** (redo att klistra in med riktiga rubriker och tabeller i **Word, Outlook och Teams**) och ren, Markdown-fri klartext i urklipp.
 
 ![Steg 3: Avmaskera AI-svar i Transkerat](docs/screenshots/03-avmaskera.png)
 
