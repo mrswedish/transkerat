@@ -167,6 +167,7 @@ impl ApplicationLoopback {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }

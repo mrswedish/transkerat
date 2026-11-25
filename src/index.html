@@ -251,9 +251,18 @@
               Strikt (inkl. Roll/Titel)
             </button>
           </div>
+          <div class="seg-group" role="group" aria-label="Känslighet" title="Styr hur känslig AI-modellen (Svensk BERT NER) är för namn, organisationer och platser">
+            <button id="btn-sens-high" type="button" class="seg-btn" aria-pressed="false" title="Hög känslighet (45 %) — fångar fler möjliga namn, kan ge fler falsklarm">Hög</button>
+            <button id="btn-sens-normal" type="button" class="seg-btn" aria-pressed="true" title="Normal känslighet (60 %) — balanserad">Normal</button>
+            <button id="btn-sens-low" type="button" class="seg-btn" aria-pressed="false" title="Låg känslighet (80 %) — maskerar bara mycket säkra träffar">Låg</button>
+          </div>
           <button id="btn-run-mask" type="button" class="btn btn-sm">
             <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             <span>Analysera</span>
+          </button>
+          <button id="btn-mask-open-text" type="button" class="btn btn-ghost btn-sm" title="Öppna en befintlig textfil eller sparad transkribering direkt för maskering">
+            <span class="material-symbols-outlined">folder_open</span>
+            <span>Öppna text…</span>
           </button>
           <div class="seg-group" role="group" aria-label="Visningsläge">
             <button id="btn-mask-view-review" type="button" class="seg-btn" aria-pressed="true">Granska</button>
@@ -280,11 +289,49 @@
       </div>
 
       <!-- Statusrad / kategoriräknare för maskering -->
-      <div id="mask-summary-bar" class="hidden mb-3 px-3 py-2 bg-sheet border border-line rounded-lg flex flex-wrap items-center gap-2 text-xs shrink-0">
+      <div id="mask-summary-bar" class="hidden mb-2 px-3 py-2 bg-sheet border border-line rounded-lg flex flex-wrap items-center gap-2 text-xs shrink-0">
         <span id="mask-summary-text" class="text-sm font-medium mr-1"></span>
         <div id="mask-category-pills" class="flex flex-wrap items-center gap-1.5"></div>
+        <button id="btn-restore-ignored" type="button" class="hidden btn btn-ghost btn-sm text-xs" title="Återställ alla undantagna markeringar"></button>
         <span class="flex-1"></span>
         <span class="text-muted">Klicka på en markering för att undanta · Markera text för manuell maskering</span>
+      </div>
+
+      <!-- Snabbåtgärd när ett undantaget ord finns på flera ställen -->
+      <div id="mask-bulk-bar" class="hidden mb-2 px-3 py-2 bg-sheet border border-line border-l-[3px] border-l-primary rounded-lg text-sm flex flex-wrap items-center gap-2 shrink-0" role="status" aria-live="polite">
+        <span id="mask-bulk-text" class="flex-1 min-w-0"></span>
+        <button id="btn-mask-bulk-apply" type="button" class="btn btn-primary btn-sm shrink-0"></button>
+        <button id="btn-mask-bulk-close" type="button" class="btn btn-ghost btn-sm btn-icon-only shrink-0" aria-label="Stäng">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+
+      <!-- AI-prompt som följer med vid "Kopiera maskerat" -->
+      <div id="mask-prompt-bar" class="mb-3 px-3 py-2 bg-sheet border border-line rounded-lg flex flex-col gap-2 shrink-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <label for="mask-prompt-select" class="text-xs font-semibold text-muted shrink-0">AI-prompt vid kopiering:</label>
+          <select id="mask-prompt-select" class="field h-8 text-xs w-auto min-w-[14rem] py-0">
+            <option value="protocol" selected>Mötesprotokoll (standard)</option>
+            <option value="summary">Kort sammanfattning</option>
+            <option value="actions">Åtgärdslista (Att göra)</option>
+            <option value="placeholders_only">Endast platshållarregel</option>
+            <option value="custom">Egen prompt</option>
+            <option value="none">Ingen prompt (bara maskerad text)</option>
+          </select>
+          <button id="btn-toggle-prompt-editor" type="button" class="btn btn-ghost btn-sm text-xs">
+            <span>Visa / ändra prompt</span>
+          </button>
+          <span class="flex-1"></span>
+          <span id="mask-prompt-hint" class="text-xs text-muted">Bevarar [PERSON A], [ROLL A] m.fl. så steg 3 kan avmaskera svaret.</span>
+        </div>
+        <div id="mask-prompt-editor-wrap" class="hidden flex flex-col gap-2 pt-2 border-t border-line">
+          <textarea id="mask-prompt-editor" rows="5" class="field text-xs font-mono leading-relaxed resize-y"
+            placeholder="Skriv din egen AI-prompt här…"></textarea>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-xs text-muted">Tips: Låt instruktionen om [PLATSHÅLLARE] stå kvar så fungerar avmaskeringen i steg 3 bäst.</span>
+            <button id="btn-reset-prompt" type="button" class="btn btn-ghost btn-sm text-xs">Återställ mall</button>
+          </div>
+        </div>
       </div>
 
       <!-- Pappret för Maskera -->
@@ -295,8 +342,17 @@
             <div id="mask-empty-state" class="flex-1 flex flex-col items-center justify-center text-center py-12 gap-3">
               <svg class="w-10 h-10 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
               <p id="mask-empty-msg" class="text-sm text-muted max-w-md">
-                Transkribera ljud eller skriv text i steg 1, och klicka sedan på <strong>Analysera</strong> för att maskera personuppgifter 100 % lokalt.
+                Transkribera ljud i steg 1, klistra in text med <strong>Ctrl+V</strong>, eller öppna en befintlig textfil/transkribering direkt för att maskera personuppgifter 100 % lokalt.
               </p>
+              <div class="flex flex-wrap items-center justify-center gap-2">
+                <button id="btn-mask-empty-paste" type="button" class="btn btn-primary btn-sm">
+                  <span>Klistra in text (Ctrl+V)</span>
+                </button>
+                <button id="btn-mask-empty-open-text" type="button" class="btn btn-sm">
+                  <span class="material-symbols-outlined">folder_open</span>
+                  <span>Öppna textfil / transkribering…</span>
+                </button>
+              </div>
             </div>
 
             <!-- Interaktiv granskningsvy -->
@@ -326,6 +382,7 @@
                   <th>Original</th>
                   <th>Kategori</th>
                   <th>Antal</th>
+                  <th class="text-right">Åtgärd</th>
                 </tr>
               </thead>
               <tbody id="mask-table-body"></tbody>
@@ -555,15 +612,6 @@
                 <input type="range" id="thread-count-slider" min="1" max="16" value="4" step="1" class="w-full accent-primary cursor-pointer">
               </div>
 
-              <div>
-                <div class="flex items-center justify-between">
-                  <label for="confidence-threshold-slider" class="text-sm font-semibold">Markera osäkra ord</label>
-                  <span id="confidence-threshold-label" class="text-sm font-mono">60%</span>
-                </div>
-                <p class="hint mb-2">Osäkra ord får prickad understrykning i segmentvyn.</p>
-                <input type="range" id="confidence-threshold-slider" min="10" max="99" value="60" step="1" class="w-full accent-primary cursor-pointer">
-              </div>
-
               <div class="pt-4 border-t border-line">
                 <h4 class="text-sm font-semibold">Nollställ applikationen</h4>
                 <p class="hint mb-2">Återställ Transkerat till nyskick och välj vad du vill ta bort eller behålla.</p>
@@ -657,11 +705,17 @@
     <div class="dialog w-11/12 max-w-md flex flex-col max-h-[90dvh]">
       <div class="p-5 pb-4 shrink-0">
         <h3 id="import-title" class="text-base font-semibold mb-3">Öppna</h3>
-        <button id="import-choice-file" class="btn btn-primary" data-autofocus>
-          <span class="material-symbols-outlined">audio_file</span>
-          <span>Öppna ljud- eller videofil…</span>
-        </button>
-        <p class="hint mt-2">MP3, M4A, WAV, MP4 med flera.</p>
+        <div class="flex flex-wrap gap-2">
+          <button id="import-choice-file" class="btn btn-primary" data-autofocus>
+            <span class="material-symbols-outlined">audio_file</span>
+            <span>Öppna ljud- eller videofil…</span>
+          </button>
+          <button id="import-choice-text" class="btn">
+            <span class="material-symbols-outlined">folder_open</span>
+            <span>Öppna textfil till Maskera…</span>
+          </button>
+        </div>
+        <p class="hint mt-2">Ljud/video: MP3, M4A, WAV, MP4 m.fl. · Text: TXT, MD, JSON.</p>
       </div>
       <div class="px-5 pb-4 overflow-y-auto min-h-0 border-t border-line pt-4">
         <h4 id="recent-title" class="text-sm font-semibold mb-1">Senaste inspelningar</h4>

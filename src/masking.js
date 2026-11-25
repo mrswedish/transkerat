@@ -219,7 +219,94 @@ export function unmaskText(aiText, table) {
   return { text: output, replacements };
 }
 
+// ── AI-promptmallar vid "Kopiera maskerat" ────────────────────────────────────
+
+export const PLACEHOLDER_RULE =
+  "VIKTIGT: Texten nedan är pseudonymiserad med platshållare inom hakparenteser (t.ex. {EXAMPLES}). " +
+  "Behåll ALLTID alla platshållare exakt som de står — inklusive hakparenteser och versaler. " +
+  "Ersätt dem aldrig med generella ord som \"en deltagare\", \"chefen\" eller \"organisationen\", " +
+  "och ändra inte stavning eller böjning inuti hakparenteserna. Texten kommer att avmaskeras lokalt efteråt.";
+
+export const PROMPT_TEMPLATES = {
+  protocol: {
+    name: "Mötesprotokoll",
+    body:
+      "Skapa ett tydligt och strukturerat mötesprotokoll på svenska utifrån transkriberingen nedan.\n\n" +
+      "Använd följande rubriker:\n" +
+      "1. Sammanhang & syfte\n" +
+      "2. Huvudpunkter som diskuterades (ange vilka [PLATSHÅLLARE] som sa eller ansvarade för vad)\n" +
+      "3. Beslut\n" +
+      "4. Åtgärder / nästa steg (lista uppgift, ansvarig [PLATSHÅLLARE] och ev. tidpunkt)\n\n" +
+      PLACEHOLDER_RULE,
+  },
+  summary: {
+    name: "Kort sammanfattning",
+    body:
+      "Skriv en koncis sammanfattning på svenska i 5–7 korta punkter utifrån transkriberingen nedan. " +
+      "Lyft fram de viktigaste slutsatserna, ställningstagandena och nästa steg, och behåll berörda [PLATSHÅLLARE].\n\n" +
+      PLACEHOLDER_RULE,
+  },
+  actions: {
+    name: "Åtgärdslista (Att göra)",
+    body:
+      "Extrahera alla konkreta åtgärdspunkter, beslut och uppföljningar ur transkriberingen nedan. " +
+      "Presentera resultatet på svenska som en tydlig lista eller tabell med kolumnerna: Uppgift, Ansvarig ([PLATSHÅLLARE]) och Tidsram/kommentar.\n\n" +
+      PLACEHOLDER_RULE,
+  },
+  placeholders_only: {
+    name: "Endast platshållarregel",
+    body: PLACEHOLDER_RULE,
+  },
+  custom: {
+    name: "Egen prompt",
+    body:
+      "Sammanfatta transkriberingen nedan på svenska.\n\n" +
+      PLACEHOLDER_RULE,
+  },
+  none: {
+    name: "Ingen prompt (bara maskerad text)",
+    body: "",
+  },
+};
+
+export function samplePlaceholders(table) {
+  if (!table || table.size === 0) {
+    return "[PERSON A], [ROLL A], [ORGANISATION A]";
+  }
+  const seenLabels = new Set();
+  const examples = [];
+  for (const entry of table.values()) {
+    if (!seenLabels.has(entry.label)) {
+      seenLabels.add(entry.label);
+      examples.push(`[${entry.maskedLabel.toUpperCase()}]`);
+      if (examples.length >= 3) break;
+    }
+  }
+  return examples.length > 0 ? examples.join(", ") : "[PERSON A], [ROLL A], [ORGANISATION A]";
+}
+
+export function resolvePromptText(templateId, table, customOrEditedText) {
+  if (templateId === "none") return "";
+  const raw =
+    typeof customOrEditedText === "string" && customOrEditedText.trim()
+      ? customOrEditedText.trim()
+      : (PROMPT_TEMPLATES[templateId]?.body || PROMPT_TEMPLATES.protocol.body);
+  return raw.replace(/\{EXAMPLES\}/g, samplePlaceholders(table));
+}
+
+export function buildClipboardPayload(maskedText, table, templateId, customOrEditedText) {
+  const prompt = resolvePromptText(templateId, table, customOrEditedText);
+  if (!prompt) return maskedText;
+  return `${prompt}\n\n---\nTRANSKRIPTION:\n${maskedText}`;
+}
+
 // ── UI-kontroller för Steg 2 (Maskera) & Steg 3 (Avmaskera AI-svar) ──────────
+
+export const SENSITIVITY_LEVELS = {
+  high: { name: "Hög", threshold: 0.45 },
+  normal: { name: "Normal", threshold: 0.6 },
+  low: { name: "Låg", threshold: 0.8 },
+};
 
 export function createMaskingController({
   getTranscriptText,
@@ -231,8 +318,12 @@ export function createMaskingController({
   getPersistEnabled,
   ensureSessionDir,
   getSessionDir,
+  onOpenTextFile,
+  onPasteTextForMasking,
 }) {
   let preset = "ai_safe"; // "ai_safe" | "strict"
+  let sensitivity = localStorage.getItem("maskSensitivity") || "normal";
+  if (!SENSITIVITY_LEVELS[sensitivity]) sensitivity = "normal";
   let viewMode = "review"; // "review" | "masked"
   let sourceText = "";
   let allMatches = []; // [{ text, label, start, end, source }]
@@ -241,11 +332,20 @@ export function createMaskingController({
   let maskedText = "";
   let isAnalyzing = false;
   let savedOnDisk = false;
+  let persistTimer = null;
+  let unmaskDebounceTimer = null;
+  let pendingBulkAction = null;
 
   // DOM refs
+  const panelMask = document.getElementById("panel-mask");
   const btnAiSafe = document.getElementById("btn-preset-ai-safe");
   const btnStrict = document.getElementById("btn-preset-strict");
+  const btnSensHigh = document.getElementById("btn-sens-high");
+  const btnSensNormal = document.getElementById("btn-sens-normal");
+  const btnSensLow = document.getElementById("btn-sens-low");
   const btnRunMask = document.getElementById("btn-run-mask");
+  const btnMaskOpenText = document.getElementById("btn-mask-open-text");
+  const btnMaskEmptyOpenText = document.getElementById("btn-mask-empty-open-text");
   const btnViewReview = document.getElementById("btn-mask-view-review");
   const btnViewMasked = document.getElementById("btn-mask-view-masked");
   const btnManualMask = document.getElementById("btn-manual-mask");
@@ -256,6 +356,11 @@ export function createMaskingController({
   const summaryBar = document.getElementById("mask-summary-bar");
   const summaryText = document.getElementById("mask-summary-text");
   const categoryPills = document.getElementById("mask-category-pills");
+  const btnRestoreIgnored = document.getElementById("btn-restore-ignored");
+  const bulkBar = document.getElementById("mask-bulk-bar");
+  const bulkText = document.getElementById("mask-bulk-text");
+  const btnBulkApply = document.getElementById("btn-mask-bulk-apply");
+  const btnBulkClose = document.getElementById("btn-mask-bulk-close");
   const emptyState = document.getElementById("mask-empty-state");
   const emptyMsg = document.getElementById("mask-empty-msg");
   const reviewEl = document.getElementById("mask-review");
@@ -265,6 +370,82 @@ export function createMaskingController({
   const tableBody = document.getElementById("mask-table-body");
   const storageStatusEl = document.getElementById("mask-storage-status");
   const btnClearMaskKey = document.getElementById("btn-clear-mask-key");
+
+  // AI-prompt refs & state
+  const promptSelect = document.getElementById("mask-prompt-select");
+  const btnTogglePromptEditor = document.getElementById("btn-toggle-prompt-editor");
+  const promptEditorWrap = document.getElementById("mask-prompt-editor-wrap");
+  const promptEditor = document.getElementById("mask-prompt-editor");
+  const btnResetPrompt = document.getElementById("btn-reset-prompt");
+  const promptHint = document.getElementById("mask-prompt-hint");
+
+  let selectedPromptId = localStorage.getItem("maskPromptId") || "protocol";
+  if (!PROMPT_TEMPLATES[selectedPromptId]) selectedPromptId = "protocol";
+  let savedCustomPrompt = localStorage.getItem("maskCustomPrompt") || PROMPT_TEMPLATES.custom.body;
+  let tempEditedPrompt = null; // tillfällig redigering av inbyggd mall i denna session
+
+  function syncPromptUI() {
+    if (promptSelect) promptSelect.value = selectedPromptId;
+    const isNone = selectedPromptId === "none";
+    if (promptHint) {
+      promptHint.textContent = isNone
+        ? "Kopierar enbart den maskerade texten utan AI-instruktion."
+        : "Bevarar [PERSON A], [ROLL A] m.fl. så steg 3 kan avmaskera svaret.";
+    }
+    if (btnTogglePromptEditor) {
+      btnTogglePromptEditor.classList.toggle("hidden", isNone);
+    }
+    if (isNone) {
+      promptEditorWrap?.classList.add("hidden");
+    } else if (promptEditor) {
+      const text =
+        selectedPromptId === "custom"
+          ? savedCustomPrompt
+          : (tempEditedPrompt ?? resolvePromptText(selectedPromptId, activeTable, null));
+      promptEditor.value = text;
+    }
+  }
+
+  promptSelect?.addEventListener("change", () => {
+    selectedPromptId = promptSelect.value;
+    localStorage.setItem("maskPromptId", selectedPromptId);
+    tempEditedPrompt = null;
+    if (selectedPromptId === "custom") {
+      promptEditorWrap?.classList.remove("hidden");
+    }
+    syncPromptUI();
+  });
+
+  btnTogglePromptEditor?.addEventListener("click", () => {
+    if (!promptEditorWrap) return;
+    const opening = promptEditorWrap.classList.contains("hidden");
+    promptEditorWrap.classList.toggle("hidden", !opening);
+    if (opening) {
+      syncPromptUI();
+      promptEditor?.focus();
+    }
+  });
+
+  promptEditor?.addEventListener("input", () => {
+    if (selectedPromptId === "custom") {
+      savedCustomPrompt = promptEditor.value;
+      localStorage.setItem("maskCustomPrompt", savedCustomPrompt);
+    } else {
+      tempEditedPrompt = promptEditor.value;
+    }
+  });
+
+  btnResetPrompt?.addEventListener("click", () => {
+    if (selectedPromptId === "custom") {
+      savedCustomPrompt = PROMPT_TEMPLATES.custom.body;
+      localStorage.setItem("maskCustomPrompt", savedCustomPrompt);
+    } else {
+      tempEditedPrompt = null;
+    }
+    syncPromptUI();
+  });
+
+  syncPromptUI();
 
   const maskOverlay = document.getElementById("mask-loading-overlay");
   const maskLoadingText = document.getElementById("mask-loading-text");
@@ -313,6 +494,88 @@ export function createMaskingController({
     btnClearMaskKey?.classList.toggle("hidden", !savedOnDisk);
   }
 
+  function hideBulkBar() {
+    bulkBar?.classList.add("hidden");
+    pendingBulkAction = null;
+  }
+
+  function showBulkBar(messageText, buttonLabel, onApply) {
+    if (!bulkBar || !bulkText || !btnBulkApply) return;
+    bulkText.textContent = messageText;
+    btnBulkApply.textContent = buttonLabel;
+    pendingBulkAction = onApply;
+    bulkBar.classList.remove("hidden");
+  }
+
+  btnBulkApply?.addEventListener("click", () => {
+    const fn = pendingBulkAction;
+    hideBulkBar();
+    if (fn) fn();
+  });
+  btnBulkClose?.addEventListener("click", hideBulkBar);
+
+  btnRestoreIgnored?.addEventListener("click", () => {
+    if (ignoredStarts.size === 0) return;
+    ignoredStarts.clear();
+    hideBulkBar();
+    recomputeAndRender();
+    announce("Alla undantagna markeringar återställdes.");
+  });
+
+  function syncSensitivityButtons() {
+    btnSensHigh?.setAttribute("aria-pressed", String(sensitivity === "high"));
+    btnSensNormal?.setAttribute("aria-pressed", String(sensitivity === "normal"));
+    btnSensLow?.setAttribute("aria-pressed", String(sensitivity === "low"));
+  }
+  syncSensitivityButtons();
+
+  function selectSensitivity(next) {
+    if (sensitivity === next || !SENSITIVITY_LEVELS[next]) return;
+    sensitivity = next;
+    localStorage.setItem("maskSensitivity", sensitivity);
+    syncSensitivityButtons();
+    if (sourceText.trim()) {
+      analyzeCurrentTranscript();
+    }
+  }
+  btnSensHigh?.addEventListener("click", () => selectSensitivity("high"));
+  btnSensNormal?.addEventListener("click", () => selectSensitivity("normal"));
+  btnSensLow?.addEventListener("click", () => selectSensitivity("low"));
+
+  btnMaskOpenText?.addEventListener("click", () => { if (onOpenTextFile) onOpenTextFile(); });
+  btnMaskEmptyOpenText?.addEventListener("click", () => { if (onOpenTextFile) onOpenTextFile(); });
+
+  document.getElementById("btn-mask-empty-paste")?.addEventListener("click", async () => {
+    try {
+      const clip = await navigator.clipboard.readText();
+      if (clip && clip.trim() && onPasteTextForMasking) {
+        await onPasteTextForMasking(clip);
+      }
+    } catch (e) {
+      await showMessage("Tryck Ctrl+V (eller Cmd+V på Mac) för att klistra in text från urklipp.", { title: "Klistra in" });
+    }
+  });
+
+  // Stöd för Ctrl+V / Cmd+V direkt i Steg 2 (Maskera) när fokus inte ligger i ett skrivfält
+  document.addEventListener("paste", (e) => {
+    if (!panelMask || panelMask.classList.contains("hidden")) return;
+    const tag = document.activeElement?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement?.isContentEditable) return;
+    const pasted = e.clipboardData?.getData("text/plain");
+    if (pasted && pasted.trim() && onPasteTextForMasking) {
+      e.preventDefault();
+      void onPasteTextForMasking(pasted);
+    }
+  });
+
+  function schedulePersistMasking() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void persistMaskingToSession();
+    }, 400);
+  }
+
   async function persistMaskingToSession() {
     if (!getPersistEnabled || !getPersistEnabled() || !sourceText.trim()) {
       savedOnDisk = false;
@@ -325,6 +588,7 @@ export function createMaskingController({
       const payload = JSON.stringify({
         version: 1,
         preset,
+        sensitivity,
         sourceText,
         matches: allMatches,
         ignoredStarts: [...ignoredStarts],
@@ -411,8 +675,16 @@ export function createMaskingController({
       }
     }
 
-    // Masked text preview
-    if (maskOutputEl) maskOutputEl.value = maskedText;
+    if (btnRestoreIgnored) {
+      const ignCount = ignoredStarts.size;
+      btnRestoreIgnored.textContent = `Återställ undantagna (${ignCount})`;
+      btnRestoreIgnored.classList.toggle("hidden", ignCount === 0);
+    }
+
+    // Masked text preview (uppdateras bara när vyn faktiskt är synlig — sparar DOM-arbete)
+    if (maskOutputEl && viewMode === "masked") {
+      maskOutputEl.value = maskedText;
+    }
 
     // Interactive review view
     renderReview(active);
@@ -422,6 +694,7 @@ export function createMaskingController({
       tableDetails.classList.toggle("hidden", activeTable.size === 0);
       tableCount.textContent = String(activeTable.size);
       tableBody.replaceChildren();
+      const frag = document.createDocumentFragment();
       for (const entry of activeTable.values()) {
         const tr = document.createElement("tr");
         const tdMask = document.createElement("td");
@@ -438,17 +711,46 @@ export function createMaskingController({
         const tdCount = document.createElement("td");
         tdCount.className = "font-mono";
         tdCount.textContent = String(entry.count);
-        tr.append(tdMask, tdOrig, tdCat, tdCount);
-        tableBody.appendChild(tr);
+
+        const tdAction = document.createElement("td");
+        tdAction.className = "text-right";
+        const btnExcl = document.createElement("button");
+        btnExcl.type = "button";
+        btnExcl.className = "btn btn-ghost btn-sm text-xs btn-danger";
+        btnExcl.textContent = entry.count > 1 ? `Undanta alla (${entry.count})` : "Undanta";
+        btnExcl.title = `Undanta alla förekomster av "${entry.originalText}" från maskeringen`;
+        btnExcl.addEventListener("click", () => {
+          const targetLower = entry.originalText.toLowerCase();
+          let changed = 0;
+          for (const m of allMatches) {
+            if (m.text.toLowerCase() === targetLower && !ignoredStarts.has(m.start)) {
+              ignoredStarts.add(m.start);
+              changed += 1;
+            }
+          }
+          hideBulkBar();
+          if (changed > 0) {
+            recomputeAndRender();
+            announce(`Undantog alla ${changed} förekomster av "${entry.originalText}".`);
+          }
+        });
+        tdAction.appendChild(btnExcl);
+
+        tr.append(tdMask, tdOrig, tdCat, tdCount, tdAction);
+        frag.appendChild(tr);
       }
+      tableBody.appendChild(frag);
     }
 
     applyViewMode();
     updateStorageIndicator();
     updateUnmaskView();
+    if (selectedPromptId !== "custom" && tempEditedPrompt === null) {
+      syncPromptUI();
+    }
 
     if (opts && opts.persist) {
-      void persistMaskingToSession();
+      schedulePersistMasking();
     }
   }
 
@@ -495,9 +797,46 @@ export function createMaskingController({
       }
 
       const toggle = () => {
-        if (ignoredStarts.has(m.start)) ignoredStarts.delete(m.start);
+        const wasIgnored = ignoredStarts.has(m.start);
+        if (wasIgnored) ignoredStarts.delete(m.start);
         else ignoredStarts.add(m.start);
+
+        const targetLower = m.text.toLowerCase();
+        const siblings = allMatches.filter(
+          (other) =>
+            other.start !== m.start &&
+            other.text.toLowerCase() === targetLower &&
+            ignoredStarts.has(other.start) === wasIgnored
+        );
+
         recomputeAndRender();
+
+        if (siblings.length > 0) {
+          const total = siblings.length + 1;
+          if (!wasIgnored) {
+            showBulkBar(
+              `"${m.text}" undantogs. Det finns ${siblings.length} förekomst${siblings.length === 1 ? "" : "er"} till i texten.`,
+              `Undanta alla (${total})`,
+              () => {
+                for (const s of siblings) ignoredStarts.add(s.start);
+                recomputeAndRender();
+                announce(`Undantog alla ${total} förekomster av "${m.text}".`);
+              }
+            );
+          } else {
+            showBulkBar(
+              `"${m.text}" maskeras igen. Det finns ${siblings.length} undantagna förekomst${siblings.length === 1 ? "" : "er"} till.`,
+              `Maskera alla (${total})`,
+              () => {
+                for (const s of siblings) ignoredStarts.delete(s.start);
+                recomputeAndRender();
+                announce(`Maskerar alla ${total} förekomster av "${m.text}".`);
+              }
+            );
+          }
+        } else {
+          hideBulkBar();
+        }
       };
       chip.addEventListener("click", toggle);
       chip.addEventListener("keydown", (e) => {
@@ -523,6 +862,9 @@ export function createMaskingController({
       reviewEl?.classList.remove("hidden");
       maskOutputEl?.classList.add("hidden");
     } else {
+      if (maskOutputEl && maskOutputEl.value !== maskedText) {
+        maskOutputEl.value = maskedText;
+      }
       reviewEl?.classList.add("hidden");
       maskOutputEl?.classList.remove("hidden");
     }
@@ -583,10 +925,11 @@ export function createMaskingController({
       if (maskProgressBar) maskProgressBar.style.width = "35%";
 
       const entities = PRESETS[preset].entities;
+      const threshold = SENSITIVITY_LEVELS[sensitivity]?.threshold ?? 0.6;
       const rawMatches = await invoke("analyze_text", {
         text: sourceText,
         entities,
-        threshold: 0.6,
+        threshold,
       });
 
       allMatches = fixByteOffsets(sourceText, rawMatches);
@@ -612,9 +955,9 @@ export function createMaskingController({
   }
 
   document.addEventListener("selectionchange", () => {
-    if (!btnManualMask) return;
+    if (!btnManualMask || !panelMask || panelMask.classList.contains("hidden") || viewMode !== "review") return;
     const selected = getSelectedTextInReview();
-    btnManualMask.classList.toggle("hidden", selected.length < 2 || viewMode !== "review");
+    btnManualMask.classList.toggle("hidden", selected.length < 2);
   });
 
   btnManualMask?.addEventListener("click", () => {
@@ -673,13 +1016,23 @@ export function createMaskingController({
   btnCopyMasked?.addEventListener("click", async () => {
     if (!maskedText) return;
     try {
-      await copyText(maskedText);
+      const override =
+        selectedPromptId === "custom"
+          ? savedCustomPrompt
+          : tempEditedPrompt;
+      const payload = buildClipboardPayload(maskedText, activeTable, selectedPromptId, override);
+      await copyText(payload);
       const prev = btnCopyMasked.innerHTML;
-      btnCopyMasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad!</span>`;
-      announce("Maskerad text är kopierad till urklipp.");
+      const label = selectedPromptId === "none" ? "Kopierad!" : "Kopierad med prompt!";
+      btnCopyMasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>${label}</span>`;
+      announce(
+        selectedPromptId === "none"
+          ? "Maskerad text är kopierad till urklipp."
+          : `Maskerad text med AI-prompt (${PROMPT_TEMPLATES[selectedPromptId]?.name || ""}) är kopierad till urklipp.`
+      );
       setTimeout(() => {
         btnCopyMasked.innerHTML = prev;
-      }, 2000);
+      }, 2200);
     } catch (e) {
       await showMessage(`Kunde inte kopiera: ${e}`, { title: "Fel", kind: "error" });
     }
@@ -705,8 +1058,11 @@ export function createMaskingController({
     unmaskInput?.focus();
   });
 
-  // Step 3 handlers
-  unmaskInput?.addEventListener("input", updateUnmaskView);
+  // Step 3 handlers (debouncad input så långa AI-svar aldrig mikrolaggar vid skrivning)
+  unmaskInput?.addEventListener("input", () => {
+    clearTimeout(unmaskDebounceTimer);
+    unmaskDebounceTimer = setTimeout(updateUnmaskView, 100);
+  });
 
   btnUnmaskPaste?.addEventListener("click", async () => {
     try {

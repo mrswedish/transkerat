@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 // SendStream: wraps cpal::Stream to satisfy Send+Sync for Tauri managed state.
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 struct SendStream(Stream);
 #[cfg(not(target_os = "windows"))]
 unsafe impl Send for SendStream {}

@@ -461,6 +461,58 @@ async fn save_text_file(
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedTextFile {
+    file_name: String,
+    content: String,
+}
+
+/// Öppnar en befintlig textfil eller sparad transkribering (.txt, .md, .csv, .json) för direkt maskering.
+#[tauri::command]
+async fn pick_text_file(app_handle: AppHandle) -> Result<Option<PickedTextFile>, String> {
+    use tauri_plugin_dialog::FilePath;
+    let path = app_handle
+        .dialog()
+        .file()
+        .set_title("Öppna textfil eller transkribering")
+        .add_filter("Text & transkribering", &["txt", "md", "csv", "json"])
+        .blocking_pick_file();
+    let Some(FilePath::Path(p)) = path else {
+        return Ok(None);
+    };
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "text.txt".to_string());
+    let raw = fs::read_to_string(&p)
+        .map_err(|e| format!("Kunde inte läsa filen {file_name}: {e}"))?;
+
+    // Om användaren öppnar en Transkerat-sparad transkribering.json, plocka ut texten snyggt.
+    let content = if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| {
+                v.get("rawText")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        v.get("segments").and_then(|arr| arr.as_array()).map(|segs| {
+                            segs.iter()
+                                .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                    })
+            })
+            .unwrap_or(raw)
+    } else {
+        raw
+    };
+
+    Ok(Some(PickedTextFile { file_name, content }))
+}
+
 #[tauri::command]
 async fn pick_audio_file(app_handle: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::FilePath;
@@ -536,6 +588,7 @@ pub fn run() {
             get_app_version,
             save_text_file,
             pick_audio_file,
+            pick_text_file,
             logging::get_log_path,
             logging::log_message,
             logging::open_log_file,

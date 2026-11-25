@@ -218,7 +218,6 @@ let transcriptSegments = [];
 let segmentRowsCache = [];
 let currentActiveSegIdx = -1;
 let segmentViewActive = false;
-let confidenceThreshold = 0.6;
 let currentPlaybackUrl = null;
 let audioPlayer = null;
 let selectedMicId = "default";
@@ -306,7 +305,6 @@ function loadSettings() {
   const micId = localStorage.getItem("selectedMicId");
   const wasapi = localStorage.getItem("wasapiEnabled");
   identifySpeakers = localStorage.getItem("identifySpeakers") === "true";
-  const confThresh = localStorage.getItem("confidenceThreshold");
   const savedPersist = localStorage.getItem("persistSessionData");
   persistSessionData = savedPersist === null ? true : savedPersist === "true";
   const savedGpu = localStorage.getItem("useGpu");
@@ -318,7 +316,6 @@ function loadSettings() {
 
   if (micId) selectedMicId = micId;
   if (wasapi !== null) wasapiEnabled = wasapi === "true";
-  if (confThresh !== null) confidenceThreshold = parseFloat(confThresh);
 
   const wasapiToggle = document.getElementById("wasapi-toggle");
   if (wasapiToggle) wasapiToggle.checked = wasapiEnabled;
@@ -334,11 +331,6 @@ function loadSettings() {
   if (threadValue) threadValue.textContent = String(threadCount);
 
   syncWasapiVisual();
-
-  const confSlider = document.getElementById("confidence-threshold-slider");
-  const confLabel = document.getElementById("confidence-threshold-label");
-  if (confSlider) confSlider.value = Math.round(confidenceThreshold * 100);
-  if (confLabel) confLabel.textContent = Math.round(confidenceThreshold * 100) + "%";
 
   renderVocab();
   updateFooter();
@@ -608,6 +600,8 @@ async function initialize() {
       await saveCurrentTranscriptNow();
       return dir;
     },
+    onOpenTextFile: () => openTextFileForMasking(),
+    onPasteTextForMasking: (text) => loadRawTextForMasking(text, "inklistrad-text"),
   });
 
   updateFooter();
@@ -919,13 +913,6 @@ btnSaveSettings.addEventListener("click", async () => {
   persistSessionData = newPersist;
   useGpu = newGpu;
   await saveVocabNow();
-
-  const confSlider = document.getElementById("confidence-threshold-slider");
-  if (confSlider) {
-    confidenceThreshold = parseInt(confSlider.value, 10) / 100;
-    localStorage.setItem("confidenceThreshold", confidenceThreshold.toString());
-    if (segmentViewActive && transcriptSegments.length > 0) renderSegmentEditor();
-  }
 
   selectedMicId = newMicId;
   wasapiEnabled = newWasapi;
@@ -1242,16 +1229,22 @@ function formatRecordingTitle(rec) {
 async function showImportChoice() {
   let recs = [];
   try { recs = await invoke("list_recordings", { recordingDir: recordingDir || null }); } catch (_) {}
-  if (recs.length === 0) return { kind: "file" };
 
   return new Promise(resolve => {
     const modal = document.getElementById("import-choice-modal");
     const fileBtn = document.getElementById("import-choice-file");
+    const textBtn = document.getElementById("import-choice-text");
     const cancelBtn = document.getElementById("import-choice-cancel");
     const list = document.getElementById("recent-list");
     if (!modal || !fileBtn || !cancelBtn || !list) { resolve({ kind: "file" }); return; }
 
     list.replaceChildren();
+    if (recs.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "hint";
+      empty.textContent = "Inga tidigare inspelningar eller sessioner ännu.";
+      list.appendChild(empty);
+    }
     for (const rec of recs) {
       const li = document.createElement("li");
       li.className = "recent-row";
@@ -1299,13 +1292,58 @@ async function showImportChoice() {
     const cleanup = () => {
       modal.classList.add("hidden");
       fileBtn.removeEventListener("click", onFile);
+      textBtn?.removeEventListener("click", onText);
       cancelBtn.removeEventListener("click", onCancel);
     };
     const onFile = () => { cleanup(); resolve({ kind: "file" }); };
+    const onText = () => { cleanup(); resolve({ kind: "text" }); };
     const onCancel = () => { cleanup(); resolve(null); };
     fileBtn.addEventListener("click", onFile);
+    textBtn?.addEventListener("click", onText);
     cancelBtn.addEventListener("click", onCancel);
   });
+}
+
+async function loadRawTextForMasking(rawText, label = "text", noticeMsg = null) {
+  const cleaned = (rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!cleaned.trim()) return;
+  hidePostRecordingActions();
+  pendingRecording = null;
+  teardownPlayer();
+  transcriptSegments = [];
+  segmentRowsCache = [];
+  speakerNames = {};
+  lastTranscribedPath = null;
+  wasapiRecordingReady = false;
+  currentSessionDir = null;
+  const editor = document.getElementById("segment-editor");
+  if (editor) editor.replaceChildren();
+  document.getElementById("btn-segment-toggle")?.classList.add("hidden");
+  btnRedo.classList.add("hidden");
+  btnSaveAudio?.classList.add("hidden");
+  showRawView();
+  outputText.value = cleaned;
+  maskingCtrl?.resetMaskState();
+
+  await ensureActiveSession(null, label);
+  await saveCurrentTranscriptNow();
+  if (noticeMsg) showNotice(noticeMsg);
+  switchStep("mask");
+}
+
+async function openTextFileForMasking() {
+  try {
+    const picked = await invoke("pick_text_file");
+    if (!picked || !picked.content) return;
+    const baseLabel = (picked.fileName || "text").replace(/\.[^.]+$/, "");
+    await loadRawTextForMasking(
+      picked.content,
+      baseLabel,
+      `Öppnade "${picked.fileName}" — klar för maskering.`
+    );
+  } catch (e) {
+    await message(`Kunde inte öppna textfilen: ${e}`, { title: "Fel", kind: "error" });
+  }
 }
 
 async function openSavedSession(rec) {
@@ -1369,6 +1407,10 @@ btnFile.addEventListener("click", async () => {
         disableControls();
         await processAudioFile(selected);
       }
+      return;
+    }
+    if (choice.kind === "text") {
+      await openTextFileForMasking();
       return;
     }
     if (!choice.rec.recoverable && (choice.rec.hasTranscript || choice.rec.hasMasking)) {
@@ -1508,7 +1550,6 @@ function buildSegmentRow(seg, idx) {
   const autoGrow = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
   ta.addEventListener("input", () => {
     transcriptSegments[idx].text = ta.value;
-    outputText.value = buildPlainText();
     autoGrow();
     saveCurrentTranscriptSoon();
   });
@@ -1516,6 +1557,7 @@ function buildSegmentRow(seg, idx) {
   ta.addEventListener("focus", () => { textAtFocus = transcriptSegments[idx].text; });
   const finishEdit = () => {
     if (ta.classList.contains("hidden")) return;
+    outputText.value = buildPlainText();
     if (textAtFocus && ta.value !== textAtFocus) suggestVocabFromEdit(textAtFocus, ta.value);
     const newView = buildConfidenceView(transcriptSegments[idx]);
     makeViewEditable(newView);
@@ -1546,9 +1588,12 @@ function buildSegmentRow(seg, idx) {
 }
 
 let autoGrowObserver = null;
+let segmentRenderJobId = 0;
+
 function renderSegmentEditor() {
   const editor = document.getElementById("segment-editor");
   if (!editor) return;
+  const jobId = ++segmentRenderJobId;
   editor.replaceChildren();
   segmentRowsCache = [];
   currentActiveSegIdx = -1;
@@ -1564,20 +1609,43 @@ function renderSegmentEditor() {
     });
   }, { rootMargin: "200px" });
 
+  // Batchad rendering via requestIdleCallback så 1 300+ segment aldrig fryser UI:t
+  const CHUNK = 50;
+  let i = 0;
   let lastSpeakerRendered = null;
-  const frag = document.createDocumentFragment();
-  for (let i = 0; i < transcriptSegments.length; i++) {
-    const seg = transcriptSegments[i];
-    if (seg.speakerId && seg.speakerId !== lastSpeakerRendered) {
-      frag.appendChild(buildSpeakerHeader(seg.speakerId));
+  const total = transcriptSegments.length;
+
+  function renderBatch(deadline) {
+    if (jobId !== segmentRenderJobId) return;
+    const frag = document.createDocumentFragment();
+    let added = 0;
+    const hasDeadline = deadline && typeof deadline.timeRemaining === "function";
+    while (i < total && added < CHUNK && (!hasDeadline || deadline.timeRemaining() > 4 || deadline.didTimeout)) {
+      const seg = transcriptSegments[i];
+      if (seg.speakerId && seg.speakerId !== lastSpeakerRendered) {
+        frag.appendChild(buildSpeakerHeader(seg.speakerId));
+      }
+      lastSpeakerRendered = seg.speakerId || null;
+      const row = buildSegmentRow(seg, i);
+      frag.appendChild(row);
+      segmentRowsCache.push(row);
+      i++;
+      added++;
     }
-    lastSpeakerRendered = seg.speakerId || null;
-    const row = buildSegmentRow(seg, i);
-    frag.appendChild(row);
-    segmentRowsCache.push(row);
+    editor.appendChild(frag);
+    for (let j = segmentRowsCache.length - added; j < segmentRowsCache.length; j++) {
+      autoGrowObserver.observe(segmentRowsCache[j]);
+    }
+    if (i < total) {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(renderBatch, { timeout: 100 });
+      } else {
+        setTimeout(() => renderBatch({ timeRemaining: () => 16, didTimeout: false }), 0);
+      }
+    }
   }
-  editor.appendChild(frag);
-  segmentRowsCache.forEach(r => autoGrowObserver.observe(r));
+
+  renderBatch({ timeRemaining: () => 16, didTimeout: false });
 }
 
 function showSegmentView() {

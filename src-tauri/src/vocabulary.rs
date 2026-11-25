@@ -197,6 +197,7 @@ pub(crate) fn active_entries(store: &VocabStore) -> Vec<Entry> {
 }
 
 /// Text som Whisper får som ledtråd (begränsad längd; Whisper läser bara ~224 tokens).
+#[cfg(test)]
 pub(crate) fn whisper_prompt(entries: &[Entry]) -> Option<String> {
     let mut s = String::new();
     for e in entries {

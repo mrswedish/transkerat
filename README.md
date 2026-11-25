@@ -47,9 +47,12 @@ Klicka på **Maskera text →** för att pseudonymisera transkriptet lokalt inna
   - **AI-säker** — maskerar personnummer/samordningsnummer, e-post, telefonnummer, org.nummer, konto/giro, kortnummer, hemligheter/nycklar samt personer, organisationer, platser och övrigt.
   - **Strikt (inkl. Roll/Titel)** — maskerar allt i *AI-säker* plus svenska yrkesroller och befattningar (`[ROLL A]`, t.ex. *avdelningschefen*, *projektledaren*), IP-adresser, tider och händelser.
 - **Full kontroll i granskningsvyn:**
-  - Klicka på valfri markering för att undanta eller återaktivera den.
+  - Välj **känslighet** (*Hög 45 %*, *Normal 60 %*, *Låg 80 %*) för namn, organisationer och platser.
+  - Klicka på valfri markering för att undanta eller återaktivera den — finns ordet på flera ställen får du direkt valet **Undanta alla**, eller klicka **Undanta alla** på valfri rad i översättningstabellen.
   - Markera valfri text för att lägga till en manuell maskering.
+  - Du kan även klistra in text direkt i steg 2 med **Ctrl+V** (eller **Cmd+V** på Mac), eller öppna en befintlig textfil (`.txt`, `.md`, `.json`) via **Öppna → Öppna textfil till Maskera…** / **Öppna text…**.
   - Översättningstabellen visar exakt hur varje `[PLATSHÅLLARE]` mappas till originalet.
+- **Inbyggda AI-promptmallar vid kopiering:** När du klickar **Kopiera maskerat** kan du skicka med en färdig instruktion till AI:n (**Mötesprotokoll** som standard, **Kort sammanfattning**, **Åtgärdslista**, **Endast platshållarregel**, **Egen prompt** eller **Ingen prompt**). Prompten instruerar uttryckligen AI:n att bevara alla `[PERSON A]`, `[ROLL A]`, `[ORGANISATION A]` m.fl. exakt som de står — så att avmaskeringen i steg 3 blir komplett och träffsäker.
 - **Kopiera maskerat** med ett klick för att klistra in i din AI-tjänst.
 
 ![Steg 2: Maskera i Transkerat](docs/screenshots/02-maskera.png)
