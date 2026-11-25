@@ -415,6 +415,73 @@ body {
   font-size: 12px; font-weight: 600; color: rgb(var(--c-muted));
 }
 
+/* Formaterat avmaskerat AI-svar (Steg 3 — ren dokumenttypografi + tabeller) */
+.unmask-doc {
+  font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: rgb(var(--c-ink));
+}
+.unmask-doc .md-h1 {
+  font-size: 18px; font-weight: 700; margin: 0.4em 0 0.5em;
+  color: rgb(var(--c-ink));
+}
+.unmask-doc .md-h2 {
+  font-size: 15.5px; font-weight: 600; margin: 1.1em 0 0.4em;
+  color: rgb(var(--c-ink));
+}
+.unmask-doc .md-h3 {
+  font-size: 14.5px; font-weight: 600; margin: 0.9em 0 0.3em;
+  color: rgb(var(--c-ink));
+}
+.unmask-doc > :first-child { margin-top: 0; }
+.unmask-doc .md-para { margin: 0.45em 0; }
+.unmask-doc .md-list {
+  margin: 0.4em 0 0.7em; padding-left: 1.4em; list-style: disc;
+}
+.unmask-doc .md-ordered-list { list-style: decimal; }
+.unmask-doc .md-list li { margin: 0.25em 0; }
+.unmask-doc .md-blockquote {
+  margin: 0.6em 0; padding: 0.4em 0.85em;
+  border-left: 3px solid rgb(var(--c-primary));
+  background: rgb(var(--c-tone) / 0.45);
+  color: rgb(var(--c-muted));
+  border-radius: 0 3px 3px 0;
+}
+.unmask-doc .md-hr {
+  border: 0; border-top: 1px solid rgb(var(--c-line)); margin: 1em 0;
+}
+.unmask-doc .md-inline-code {
+  font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgb(var(--c-tone));
+}
+.unmask-doc .md-code-block {
+  font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;
+  padding: 10px 12px; border-radius: 4px; overflow-x: auto;
+  background: rgb(var(--c-paper)); border: 1px solid rgb(var(--c-line));
+  margin: 0.6em 0;
+}
+.unmask-doc .md-table-wrap {
+  overflow-x: auto; margin: 0.75em 0;
+  border: 1px solid rgb(var(--c-line)); border-radius: 4px;
+}
+.unmask-doc .md-table {
+  width: 100%; border-collapse: collapse; font-size: 13.5px;
+}
+.unmask-doc .md-table th, .unmask-doc .md-table td {
+  padding: 7px 11px; text-align: left;
+  border-bottom: 1px solid rgb(var(--c-line));
+  vertical-align: top;
+}
+.unmask-doc .md-table th {
+  font-weight: 600; font-size: 12.5px;
+  background: rgb(var(--c-paper));
+  color: rgb(var(--c-ink));
+}
+.unmask-doc .md-table tbody tr:last-child td { border-bottom: 0; }
+.unmask-doc .md-table tbody tr:hover { background: rgb(var(--c-tone) / 0.35); }
+
 /* Tillgänglighet */
 .skip-link {
   position: absolute; left: 8px; top: -48px; z-index: 400;

@@ -441,14 +441,17 @@
             placeholder="Klistra in svaret från ChatGPT, Copilot, Claude eller annan AI-tjänst här…"></textarea>
         </div>
 
-        <!-- Höger: Avmaskerat svar -->
+        <!-- Höger: Avmaskerat svar (formaterad dokumentvy utan rå Markdown) -->
         <div class="bg-sheet border border-line rounded-lg flex flex-col overflow-hidden min-h-0">
-          <div class="px-4 py-2 border-b border-line text-xs font-semibold text-primary shrink-0">
-            Avmaskerat svar (100 % lokalt)
+          <div class="px-4 py-2 border-b border-line text-xs font-semibold text-primary shrink-0 flex items-center justify-between gap-2">
+            <span>Avmaskerat svar (100 % lokalt)</span>
+            <span class="font-normal text-muted">Formaterat för Word, Outlook &amp; Teams</span>
           </div>
-          <textarea id="unmask-output" readonly
-            class="transcript-text flex-1 w-full p-4 bg-transparent border-none focus:ring-0 resize-none"
-            placeholder="Här visas svaret automatiskt med alla riktiga namn, roller och uppgifter återställda lokalt."></textarea>
+          <div id="unmask-output"
+            class="unmask-doc flex-1 overflow-y-auto p-5 select-text"
+            aria-live="polite">
+            <p class="text-sm text-muted">Här visas svaret automatiskt formaterat med alla riktiga namn, roller och uppgifter återställda lokalt.</p>
+          </div>
         </div>
       </div>
     </section>

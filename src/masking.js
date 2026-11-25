@@ -1,5 +1,11 @@
 // Maskering & avmaskering för Transkerat (portat från Maskera: Lager 1 Regex/Roller + Lager 2 Svensk BERT NER)
 
+import {
+  renderMarkdownToElement,
+  markdownToCleanHtml,
+  markdownToCleanPlainText,
+} from "./markdown.js";
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -872,6 +878,8 @@ export function createMaskingController({
     btnViewMasked?.setAttribute("aria-pressed", String(viewMode === "masked"));
   }
 
+  let lastUnmaskedRaw = "";
+
   function updateUnmaskView() {
     if (unmaskTableStatus) {
       if (activeTable.size === 0) {
@@ -884,9 +892,13 @@ export function createMaskingController({
 
     const inputVal = unmaskInput ? unmaskInput.value : "";
     const res = unmaskText(inputVal, activeTable);
-    if (unmaskOutput) unmaskOutput.value = res.text;
-    if (btnCopyUnmasked) btnCopyUnmasked.disabled = !res.text.trim();
-    if (btnSaveUnmasked) btnSaveUnmasked.disabled = !res.text.trim();
+    lastUnmaskedRaw = res.text;
+    if (unmaskOutput) {
+      renderMarkdownToElement(unmaskOutput, res.text);
+    }
+    const hasOut = Boolean(res.text.trim());
+    if (btnCopyUnmasked) btnCopyUnmasked.disabled = !hasOut;
+    if (btnSaveUnmasked) btnSaveUnmasked.disabled = !hasOut;
     if (unmaskCountBadge) {
       unmaskCountBadge.textContent = `${res.replacements} återställd${res.replacements === 1 ? "" : "a"}`;
       unmaskCountBadge.classList.toggle("hidden", !inputVal.trim());
@@ -1082,27 +1094,44 @@ export function createMaskingController({
   });
 
   btnCopyUnmasked?.addEventListener("click", async () => {
-    const txt = unmaskOutput ? unmaskOutput.value : "";
-    if (!txt) return;
+    if (!lastUnmaskedRaw || !lastUnmaskedRaw.trim()) return;
+    const html = markdownToCleanHtml(lastUnmaskedRaw);
+    const plain = markdownToCleanPlainText(lastUnmaskedRaw);
     try {
-      await copyText(txt);
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" }),
+          }),
+        ]);
+      } else {
+        await copyText(plain);
+      }
       const prev = btnCopyUnmasked.innerHTML;
       btnCopyUnmasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad!</span>`;
-      announce("Avmaskerat svar är kopierat till urklipp.");
+      announce("Formaterat avmaskerat svar är kopierat till urklipp.");
       setTimeout(() => {
         btnCopyUnmasked.innerHTML = prev;
       }, 2000);
-    } catch (e) {
-      await showMessage(`Kunde inte kopiera: ${e}`, { title: "Fel", kind: "error" });
+    } catch (_) {
+      try {
+        await copyText(plain);
+        const prev = btnCopyUnmasked.innerHTML;
+        btnCopyUnmasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad!</span>`;
+        setTimeout(() => { btnCopyUnmasked.innerHTML = prev; }, 2000);
+      } catch (e) {
+        await showMessage(`Kunde inte kopiera: ${e}`, { title: "Fel", kind: "error" });
+      }
     }
   });
 
   btnSaveUnmasked?.addEventListener("click", async () => {
-    const txt = unmaskOutput ? unmaskOutput.value : "";
-    if (!txt.trim()) return;
+    if (!lastUnmaskedRaw || !lastUnmaskedRaw.trim()) return;
+    const cleanPlain = markdownToCleanPlainText(lastUnmaskedRaw);
     try {
       await invoke("save_text_file", {
-        content: txt,
+        content: cleanPlain,
         defaultName: "ai_svar_avmaskerat.txt",
       });
     } catch (err) {

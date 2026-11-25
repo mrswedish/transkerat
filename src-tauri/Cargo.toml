@@ -1,6 +1,6 @@
 [package]
 name = "transkerat"
-version = "0.2.2"
+version = "0.2.3"
 description = "100% lokal svensk transkribering (Pianissimo / transcribe.cpp) och integritetsmaskering (Maskera)"
 authors = ["Patrik Svensk"]
 edition = "2021"
