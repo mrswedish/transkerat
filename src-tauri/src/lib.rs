@@ -194,20 +194,8 @@ async fn transcribe_file(
                 drop(eng);
                 drop(dec);
 
-                if !vocab_entries.is_empty() {
-                    let mut changes: Vec<vocabulary::Change> = Vec::new();
-                    for seg in segs.iter_mut() {
-                        let (text, c) = vocabulary::correct_text(&seg.text, &vocab_entries);
-                        if !c.is_empty() {
-                            seg.text = text;
-                            seg.tokens.clear();
-                            changes.extend(c);
-                        }
-                    }
-                    log_line(&format!("ordlista: {} ord rättades", changes.len()));
-                    let _ = app.emit("vocabulary_applied", changes);
-                }
-
+                // Kör talaridentifiering (inkl. ordnivå-splittning vid talarbyte) FÖRE ordlistan
+                // så att ordtidsstämplarna stämmer exakt och ordlistan rättar de slutgiltiga segmenten.
                 if let Some(dir) = diar_dir {
                     if !cancel.load(Ordering::Relaxed) && !segs.is_empty() {
                         let phase =
@@ -241,8 +229,9 @@ async fn transcribe_file(
                         match diarization::identify(&dir, &file_path, &mut segs, &cancel, &on_progress) {
                             Ok(n) => {
                                 log_line(&format!(
-                                    "diarization: {n} talare på {:.1} s",
-                                    started.elapsed().as_secs_f64()
+                                    "diarization: {n} talare på {:.1} s ({} segment efter splittning)",
+                                    started.elapsed().as_secs_f64(),
+                                    segs.len()
                                 ));
                                 phase("done", n, None);
                             }
@@ -262,6 +251,20 @@ async fn transcribe_file(
                             }
                         }
                     }
+                }
+
+                if !vocab_entries.is_empty() {
+                    let mut changes: Vec<vocabulary::Change> = Vec::new();
+                    for seg in segs.iter_mut() {
+                        let (text, c) = vocabulary::correct_text(&seg.text, &vocab_entries);
+                        if !c.is_empty() {
+                            seg.text = text;
+                            seg.tokens.clear();
+                            changes.extend(c);
+                        }
+                    }
+                    log_line(&format!("ordlista: {} ord rättades", changes.len()));
+                    let _ = app.emit("vocabulary_applied", changes);
                 }
                 Ok(segs)
             },

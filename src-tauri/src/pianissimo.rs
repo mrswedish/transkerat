@@ -66,6 +66,7 @@ pub struct PSegment {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
+    pub words: Vec<crate::types::WordSpan>,
 }
 
 pub struct Pianissimo {
@@ -155,6 +156,7 @@ impl Pianissimo {
                             start_ms: pass_offset_ms + seg.t0_ms.max(0),
                             end_ms: pass_offset_ms + seg.t1_ms.max(seg.t0_ms.max(0)),
                             text,
+                            words: Vec::new(),
                         });
                     }
                 }
@@ -165,6 +167,7 @@ impl Pianissimo {
                         start_ms: pass_offset_ms,
                         end_ms: pass_offset_ms + pass_dur_ms,
                         text,
+                        words: Vec::new(),
                     });
                 }
             }
@@ -177,38 +180,48 @@ impl Pianissimo {
     }
 
     fn group_words(&self, words: &[transcribe_cpp::Word], offset_ms: i64) -> Vec<PSegment> {
+        use crate::types::WordSpan;
+
         let mut result = Vec::new();
-        let mut cur: Option<(i64, i64, String)> = None;
+        let mut cur: Option<(i64, i64, String, Vec<WordSpan>)> = None;
 
         for w in words {
             let start = offset_ms + w.t0_ms.max(0);
             let end = offset_ms + w.t1_ms.max(w.t0_ms.max(0));
-            if let Some((cs, ce, ct)) = cur.take() {
+            let span = WordSpan {
+                start_ms: start,
+                end_ms: end,
+                text: w.text.clone(),
+            };
+            if let Some((cs, ce, ct, mut cw)) = cur.take() {
                 let gap_ms = start - ce;
                 let too_long = (end - cs) > 15_000;
-                if gap_ms > 1_200 || too_long {
+                // 800 ms paus ger skarpare replikskiften (särskilt vid hälsningar i början av möten)
+                if gap_ms > 800 || too_long {
                     let cleaned = self.clean_text(&ct);
                     if !cleaned.is_empty() {
                         result.push(PSegment {
                             start_ms: cs,
                             end_ms: ce,
                             text: cleaned,
+                            words: cw,
                         });
                     }
-                    cur = Some((start, end, w.text.clone()));
+                    cur = Some((start, end, w.text.clone(), vec![span]));
                 } else {
                     let mut combined = ct;
                     if !combined.ends_with(' ') && !w.text.starts_with(' ') {
                         combined.push(' ');
                     }
                     combined.push_str(&w.text);
-                    cur = Some((cs, end, combined));
+                    cw.push(span);
+                    cur = Some((cs, end, combined, cw));
                 }
             } else {
-                cur = Some((start, end, w.text.clone()));
+                cur = Some((start, end, w.text.clone(), vec![span]));
             }
 
-            if let Some((cs, ce, ct)) = cur.take() {
+            if let Some((cs, ce, ct, cw)) = cur.take() {
                 if ct.trim_end().ends_with(['.', '!', '?']) {
                     let cleaned = self.clean_text(&ct);
                     if !cleaned.is_empty() {
@@ -216,21 +229,23 @@ impl Pianissimo {
                             start_ms: cs,
                             end_ms: ce,
                             text: cleaned,
+                            words: cw,
                         });
                     }
                 } else {
-                    cur = Some((cs, ce, ct));
+                    cur = Some((cs, ce, ct, cw));
                 }
             }
         }
 
-        if let Some((cs, ce, ct)) = cur {
+        if let Some((cs, ce, ct, cw)) = cur {
             let cleaned = self.clean_text(&ct);
             if !cleaned.is_empty() {
                 result.push(PSegment {
                     start_ms: cs,
                     end_ms: ce,
                     text: cleaned,
+                    words: cw,
                 });
             }
         }
@@ -259,6 +274,15 @@ impl crate::engine::Engine for Pianissimo {
                 text: s.text,
                 tokens: Vec::new(),
                 speaker_id: None,
+                words: s
+                    .words
+                    .into_iter()
+                    .map(|w| crate::types::WordSpan {
+                        start_ms: w.start_ms + offset_ms,
+                        end_ms: w.end_ms + offset_ms,
+                        text: w.text,
+                    })
+                    .collect(),
             })
             .collect())
     }

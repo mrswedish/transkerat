@@ -242,7 +242,10 @@ export const PROMPT_TEMPLATES = {
       "1. Sammanhang & syfte\n" +
       "2. Huvudpunkter som diskuterades (ange vilka [PLATSHÅLLARE] som sa eller ansvarade för vad)\n" +
       "3. Beslut\n" +
-      "4. Åtgärder / nästa steg (lista uppgift, ansvarig [PLATSHÅLLARE] och ev. tidpunkt)\n\n" +
+      "4. Åtgärder / nästa steg (lista uppgift, ansvarig [PLATSHÅLLARE] och tidpunkt)\n\n" +
+      "REGLER FÖR INNEHÅLL:\n" +
+      "- Skilj tydligt mellan fattade beslut, förslag och ren information — skriv bara sådant under \"Beslut\" som deltagarna faktiskt kom överens om.\n" +
+      "- Hitta inte på uppgifter. Om ansvarig eller tidpunkt saknas, skriv \"Ej angivet\".\n\n" +
       PLACEHOLDER_RULE,
   },
   summary: {
@@ -256,7 +259,8 @@ export const PROMPT_TEMPLATES = {
     name: "Åtgärdslista (Att göra)",
     body:
       "Extrahera alla konkreta åtgärdspunkter, beslut och uppföljningar ur transkriberingen nedan. " +
-      "Presentera resultatet på svenska som en tydlig lista eller tabell med kolumnerna: Uppgift, Ansvarig ([PLATSHÅLLARE]) och Tidsram/kommentar.\n\n" +
+      "Presentera resultatet på svenska som en tydlig lista eller tabell med kolumnerna: Uppgift, Ansvarig ([PLATSHÅLLARE]) och Tidsram/kommentar. " +
+      "Skilj mellan fattade beslut och förslag, och skriv \"Ej angivet\" om ansvarig eller tidpunkt saknas.\n\n" +
       PLACEHOLDER_RULE,
   },
   placeholders_only: {

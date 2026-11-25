@@ -56,10 +56,12 @@ pub(crate) struct Turn {
 /// Felsträng som betyder "avbruten av användaren" (inte ett fel).
 pub(crate) const CANCELLED: &str = "avbruten";
 
-/// Segmenteringssteg i sekunder. speakrs standard på CPU är 1 s (varje sekund bearbetas i
-/// ~10 överlappande fönster); 2 s halverar arbetet och gav samma talare och >99 % samma
-/// tidsgränser på referensfiler med känt antal talare. (3 s tappade en talare på en kort fil.)
-const STEP_SECONDS: f32 = 2.0;
+/// Segmenteringssteg i sekunder:
+/// - ≤ 15 min ljud: 1,0 s (pyannotes standard — dubbelt så tät fönstertäckning i början och skarpare byten)
+/// - > 15 min ljud: 2,0 s (halverar CPU-tiden på långa möten med bibehållen noggrannhet)
+const SHORT_AUDIO_SAMPLES: usize = 16_000 * 60 * 15;
+const STEP_SHORT_SECONDS: f32 = 1.0;
+const STEP_LONG_SECONDS: f32 = 2.0;
 
 /// Förlopp: (procent 0–97, uppskattad tid kvar i sekunder).
 pub(crate) type OnProgress<'a> = &'a (dyn Fn(i32, i64) + Sync);
@@ -75,9 +77,14 @@ pub(crate) fn diarize(
     cancel: &AtomicBool,
     on_progress: OnProgress,
 ) -> Result<Vec<Turn>, String> {
+    let step_seconds = if samples.len() <= SHORT_AUDIO_SAMPLES {
+        STEP_SHORT_SECONDS
+    } else {
+        STEP_LONG_SECONDS
+    };
     let load = |e: &dyn std::fmt::Display| format!("Kunde inte läsa talarmodellerna: {e}");
     let bundle = ModelBundle::from_dir(model_dir).map_err(|e| load(&e))?;
-    let mut seg = SegmentationModel::with_mode(bundle.segmentation_path(), STEP_SECONDS, ExecutionMode::Cpu)
+    let mut seg = SegmentationModel::with_mode(bundle.segmentation_path(), step_seconds, ExecutionMode::Cpu)
         .map_err(|e| load(&e))?;
     let mut emb = EmbeddingModel::with_mode(bundle.embedding_path(), ExecutionMode::Cpu)
         .map_err(|e| load(&e))?;
@@ -153,43 +160,153 @@ fn turns_from_segments<'a>(segs: impl Iterator<Item = (f64, f64, &'a str)>) -> V
         .collect()
 }
 
-/// Sätter `speaker_id` på varje segment: talaren med störst tidsöverlapp, annars
-/// närmaste tur (högst 2 s bort). Returnerar antal talare som fick minst ett segment.
-pub(crate) fn assign_speakers(segments: &mut [TranscriptSegment], turns: &[Turn]) -> i32 {
-    const MAX_GAP_MS: i64 = 2000;
-    for seg in segments.iter_mut() {
-        let mut best: Option<(i32, i64)> = None;
-        let mut per: Vec<(i32, i64)> = Vec::new();
-        for t in turns {
-            let ov = seg.end_ms.min(t.end_ms) - seg.start_ms.max(t.start_ms);
-            if ov > 0 {
-                match per.iter_mut().find(|(s, _)| *s == t.speaker) {
-                    Some(e) => e.1 += ov,
-                    None => per.push((t.speaker, ov)),
+fn pick_speaker_for_span(start_ms: i64, end_ms: i64, turns: &[Turn], max_gap_ms: i64) -> Option<i32> {
+    let mut best: Option<(i32, i64)> = None;
+    let mut per: Vec<(i32, i64)> = Vec::new();
+    for t in turns {
+        let ov = end_ms.min(t.end_ms) - start_ms.max(t.start_ms);
+        if ov > 0 {
+            match per.iter_mut().find(|(s, _)| *s == t.speaker) {
+                Some(e) => e.1 += ov,
+                None => per.push((t.speaker, ov)),
+            }
+        }
+    }
+    for (s, ov) in per {
+        if best.map(|(_, b)| ov > b).unwrap_or(true) {
+            best = Some((s, ov));
+        }
+    }
+    if best.is_none() {
+        let mid = (start_ms + end_ms) / 2;
+        best = turns
+            .iter()
+            .map(|t| {
+                let d = if mid < t.start_ms {
+                    t.start_ms - mid
+                } else if mid > t.end_ms {
+                    mid - t.end_ms
+                } else {
+                    0
+                };
+                (t.speaker, d)
+            })
+            .filter(|(_, d)| *d <= max_gap_ms)
+            .min_by_key(|(_, d)| *d);
+    }
+    best.map(|(s, _)| s)
+}
+
+fn join_word_spans(words: &[crate::types::WordSpan]) -> String {
+    let mut combined = String::new();
+    for w in words {
+        let t = w.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let starts_punct = t
+            .chars()
+            .next()
+            .is_some_and(|c| matches!(c, '.' | ',' | '!' | '?' | ':' | ';' | ')'));
+        if !combined.is_empty() && !starts_punct && !combined.ends_with('(') {
+            combined.push(' ');
+        }
+        combined.push_str(t);
+    }
+    combined
+}
+
+/// Tilldelar talare på **ordnivå** när ordtidsstämplar finns (och splittar segmentet automatiskt
+/// vid talarbyte, med anti-flimmer-utjämning för enstaka brus-ord). Faller tillbaka till
+/// segmentnivå-överlapp om `words` saknas. Returnerar antal talare som fick minst ett segment.
+pub(crate) fn assign_speakers(segments: &mut Vec<TranscriptSegment>, turns: &[Turn]) -> i32 {
+    const MAX_GAP_MS: i64 = 2500;
+    let mut expanded: Vec<TranscriptSegment> = Vec::with_capacity(segments.len());
+
+    for seg in segments.drain(..) {
+        if seg.words.len() < 2 {
+            let spk = pick_speaker_for_span(seg.start_ms, seg.end_ms, turns, MAX_GAP_MS);
+            expanded.push(TranscriptSegment {
+                speaker_id: spk,
+                ..seg
+            });
+            continue;
+        }
+
+        // 1. Tilldela varje ord sin talare från turns
+        let mut word_spk: Vec<Option<i32>> = seg
+            .words
+            .iter()
+            .map(|w| pick_speaker_for_span(w.start_ms, w.end_ms, turns, MAX_GAP_MS))
+            .collect();
+
+        // 2. Fyll i ev. None-luckor inom segmentet från närmaste granne (framåt, sedan bakåt)
+        let seg_fallback = pick_speaker_for_span(seg.start_ms, seg.end_ms, turns, MAX_GAP_MS);
+        for i in 1..word_spk.len() {
+            if word_spk[i].is_none() {
+                word_spk[i] = word_spk[i - 1];
+            }
+        }
+        for i in (0..word_spk.len().saturating_sub(1)).rev() {
+            if word_spk[i].is_none() {
+                word_spk[i] = word_spk[i + 1];
+            }
+        }
+        for s in word_spk.iter_mut() {
+            if s.is_none() {
+                *s = seg_fallback;
+            }
+        }
+
+        // 3. Anti-flimmer: ett enstaka isolerat ord mellan två ord av samma talare (A, B, A) jämnas ut till A
+        if word_spk.len() >= 3 {
+            for i in 1..(word_spk.len() - 1) {
+                if word_spk[i - 1].is_some()
+                    && word_spk[i - 1] == word_spk[i + 1]
+                    && word_spk[i] != word_spk[i - 1]
+                {
+                    word_spk[i] = word_spk[i - 1];
                 }
             }
         }
-        for (s, ov) in per {
-            if best.map(|(_, b)| ov > b).unwrap_or(true) {
-                best = Some((s, ov));
+
+        // 4. Om hela segmentet har samma talare: behåll originaltexten orörd
+        let first_spk = word_spk[0];
+        if word_spk.iter().all(|s| *s == first_spk) {
+            expanded.push(TranscriptSegment {
+                speaker_id: first_spk,
+                ..seg
+            });
+            continue;
+        }
+
+        // 5. Splitta vid varje talarbyte
+        let mut run_start = 0usize;
+        while run_start < seg.words.len() {
+            let spk = word_spk[run_start];
+            let mut run_end = run_start + 1;
+            while run_end < seg.words.len() && word_spk[run_end] == spk {
+                run_end += 1;
             }
+            let slice = &seg.words[run_start..run_end];
+            let text = join_word_spans(slice);
+            if !text.is_empty() {
+                expanded.push(TranscriptSegment {
+                    start_ms: slice.first().map(|w| w.start_ms).unwrap_or(seg.start_ms),
+                    end_ms: slice.last().map(|w| w.end_ms).unwrap_or(seg.end_ms),
+                    text,
+                    tokens: Vec::new(),
+                    speaker_id: spk,
+                    words: slice.to_vec(),
+                });
+            }
+            run_start = run_end;
         }
-        if best.is_none() {
-            let mid = (seg.start_ms + seg.end_ms) / 2;
-            best = turns
-                .iter()
-                .map(|t| {
-                    let d = if mid < t.start_ms { t.start_ms - mid } else if mid > t.end_ms { mid - t.end_ms } else { 0 };
-                    (t.speaker, d)
-                })
-                .filter(|(_, d)| *d <= MAX_GAP_MS)
-                .min_by_key(|(_, d)| *d);
-        }
-        seg.speaker_id = best.map(|(s, _)| s);
     }
+
     // Numrera om efter första uppträdande i transkriptet, så "Talare 1" är den som talar först.
     let mut order: Vec<i32> = Vec::new();
-    for seg in segments.iter_mut() {
+    for seg in expanded.iter_mut() {
         if let Some(s) = seg.speaker_id {
             let idx = match order.iter().position(|o| *o == s) {
                 Some(i) => i,
@@ -201,6 +318,7 @@ pub(crate) fn assign_speakers(segments: &mut [TranscriptSegment], turns: &[Turn]
             seg.speaker_id = Some(idx as i32 + 1);
         }
     }
+    *segments = expanded;
     order.len() as i32
 }
 
@@ -217,12 +335,12 @@ fn load_samples(path: &str, cancel: &AtomicBool) -> Result<Vec<f32>, String> {
     Ok(all)
 }
 
-/// Hela steget: avkoda → diarisera → tilldela talare. Returnerar antal talare.
+/// Hela steget: avkoda → diarisera → tilldela talare (och splitta vid talarbyte). Returnerar antal talare.
 /// Felet är aldrig ödesdigert för transkriptet — anroparen behåller texten utan talare.
 pub(crate) fn identify(
     model_dir: &Path,
     audio_path: &str,
-    segments: &mut [TranscriptSegment],
+    segments: &mut Vec<TranscriptSegment>,
     cancel: &AtomicBool,
     on_progress: OnProgress,
 ) -> Result<i32, String> {
@@ -240,9 +358,72 @@ pub(crate) fn identify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::WordSpan;
 
     fn seg(s: i64, e: i64) -> TranscriptSegment {
-        TranscriptSegment { start_ms: s, end_ms: e, text: String::new(), tokens: vec![], speaker_id: None }
+        TranscriptSegment { start_ms: s, end_ms: e, text: String::new(), tokens: vec![], speaker_id: None, words: vec![] }
+    }
+
+    fn w(s: i64, e: i64, t: &str) -> WordSpan {
+        WordSpan { start_ms: s, end_ms: e, text: t.to_string() }
+    }
+
+    #[test]
+    fn splittar_blandat_segment_vid_talarbyte() {
+        let turns = vec![
+            Turn { start_ms: 0, end_ms: 1500, speaker: 1 },
+            Turn { start_ms: 1500, end_ms: 3500, speaker: 2 },
+        ];
+        let mut segs = vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: 3200,
+            text: "Hej hörs jag? Ja du hörs bra.".into(),
+            tokens: vec![],
+            speaker_id: None,
+            words: vec![
+                w(100, 400, "Hej"),
+                w(450, 900, "hörs"),
+                w(950, 1400, "jag?"),
+                w(1600, 1900, "Ja"),
+                w(1950, 2200, "du"),
+                w(2250, 2600, "hörs"),
+                w(2650, 3100, "bra."),
+            ],
+        }];
+        let n = assign_speakers(&mut segs, &turns);
+        assert_eq!(n, 2);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].speaker_id, Some(1));
+        assert_eq!(segs[0].text, "Hej hörs jag?");
+        assert_eq!(segs[1].speaker_id, Some(2));
+        assert_eq!(segs[1].text, "Ja du hörs bra.");
+    }
+
+    #[test]
+    fn anti_flimmer_utjamnar_enstaka_brusord() {
+        let turns = vec![
+            Turn { start_ms: 0, end_ms: 1000, speaker: 1 },
+            Turn { start_ms: 1000, end_ms: 1300, speaker: 2 },
+            Turn { start_ms: 1300, end_ms: 3000, speaker: 1 },
+        ];
+        let mut segs = vec![TranscriptSegment {
+            start_ms: 0,
+            end_ms: 2500,
+            text: "Välkomna till mötet idag.".into(),
+            tokens: vec![],
+            speaker_id: None,
+            words: vec![
+                w(100, 900, "Välkomna"),
+                w(1050, 1250, "till"), // isolerat brus-ord hos Talare 2
+                w(1400, 1900, "mötet"),
+                w(1950, 2400, "idag."),
+            ],
+        }];
+        let n = assign_speakers(&mut segs, &turns);
+        assert_eq!(n, 1);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].speaker_id, Some(1));
+        assert_eq!(segs[0].text, "Välkomna till mötet idag.");
     }
 
     #[test]

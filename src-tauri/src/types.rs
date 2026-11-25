@@ -21,6 +21,13 @@ pub(crate) struct TokenInfo {
     pub(crate) prob: f32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WordSpan {
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    pub(crate) text: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptSegment {
@@ -30,6 +37,9 @@ pub(crate) struct TranscriptSegment {
     pub(crate) tokens: Vec<TokenInfo>,
     /// 1, 2, … i den ordning talarna först hörs. None = talaridentifiering av eller osäker.
     pub(crate) speaker_id: Option<i32>,
+    /// Ordtidsstämplar från Pianissimo (används internt vid talarsplittning, serialiseras ej).
+    #[serde(skip)]
+    pub(crate) words: Vec<WordSpan>,
 }
 
 #[derive(Serialize, Clone)]
