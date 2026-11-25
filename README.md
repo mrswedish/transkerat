@@ -20,6 +20,7 @@ Spela in möten direkt i appen (på Windows) eller öppna en ljud- eller videofi
 - **Talaridentifiering (valfritt)** — skiljer automatiskt på olika röster som **Talare 1**, **Talare 2** osv. (du kan även klicka på en talaretikett för att själv döpa om den vid behov).
 - **Personliga ordlistor** — rättar automatiskt facktermer och interna begrepp som ofta hörs fel (t.ex. `kund portalen => Kundportalen`).
 - **Synkad ljudspelare** — klicka på valfri tidsstämpel för att lyssna och korrigera texten direkt.
+- **Dra och släpp & Ny arbetsyta** — dra en ljud-/videofil direkt in i fönstret för att transkribera (eller en textfil för att maskera direkt), och använd **Ny** i sidhuvudet för att rensa arbetsytan mellan möten.
 
 ![Steg 1: Transkribering i Transkerat](docs/screenshots/01-transkribering.png)
 
@@ -48,9 +49,9 @@ Klicka på **Maskera text →** för att pseudonymisera transkriptet lokalt inna
   - **Strikt (inkl. Roll/Titel)** — maskerar allt i *AI-säker* plus svenska yrkesroller och befattningar (`[ROLL A]`, t.ex. *avdelningschefen*, *projektledaren*), IP-adresser, tider och händelser.
 - **Full kontroll i granskningsvyn:**
   - Välj **känslighet** (*Hög 45 %*, *Normal 60 %*, *Låg 80 %*) för namn, organisationer och platser.
-  - Klicka på valfri markering för att undanta eller återaktivera den — finns ordet på flera ställen får du direkt valet **Undanta alla**, eller klicka **Undanta alla** på valfri rad i översättningstabellen.
+  - Klicka på valfri markering för att undanta eller återaktivera den — finns ordet på flera ställen får du direkt valet **Undanta alla**, och med **Undanta alltid** (även redigerbar under *Inställningar → Maskering · Undantagslista*) slipper du falska träffar i alla framtida möten.
   - Markera valfri text för att lägga till en manuell maskering.
-  - Du kan även klistra in text direkt i steg 2 med **Ctrl+V** (eller **Cmd+V** på Mac), eller öppna en befintlig textfil (`.txt`, `.md`, `.json`) via **Öppna → Öppna textfil till Maskera…** / **Öppna text…**.
+  - Du kan även klistra in text direkt i steg 2 med **Ctrl+V** (eller **Cmd+V** på Mac), dra och släppa en textfil i fönstret, eller öppna en befintlig textfil (`.txt`, `.md`, `.csv`, `.json`) via **Öppna → Öppna textfil till Maskera…** / **Öppna text…**.
   - Översättningstabellen visar exakt hur varje `[PLATSHÅLLARE]` mappas till originalet.
 - **Inbyggda AI-promptmallar vid kopiering:** När du klickar **Kopiera maskerat** kan du skicka med en färdig instruktion till AI:n (**Mötesprotokoll** som standard, **Kort sammanfattning**, **Åtgärdslista**, **Endast platshållarregel**, **Egen prompt** eller **Ingen prompt**). Prompten instruerar uttryckligen AI:n att bevara alla `[PERSON A]`, `[ROLL A]`, `[ORGANISATION A]` m.fl. exakt som de står — så att avmaskeringen i steg 3 blir komplett och träffsäker.
 - **Kopiera maskerat** med ett klick för att klistra in i din AI-tjänst.

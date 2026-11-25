@@ -107,8 +107,15 @@ pub(crate) async fn save_audio_file(app_handle: AppHandle, state: tauri::State<'
     use tauri_plugin_dialog::FilePath;
 
     // Streaming-flödet: hämta sökvägen till sessionsmappens recording.wav
-    let src = state.inner().audio_recorder.lock().unwrap()
-        .recording_path.lock().unwrap().clone()
+    let src = state
+        .inner()
+        .audio_recorder
+        .lock()
+        .map_err(|e| format!("Recorder-lås: {e}"))?
+        .recording_path
+        .lock()
+        .map_err(|e| format!("Path-lås: {e}"))?
+        .clone()
         .ok_or_else(|| "Ingen inspelning att spara".to_string())?;
 
     if !src.exists() {

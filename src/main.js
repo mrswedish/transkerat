@@ -1,4 +1,4 @@
-import { createMaskingController } from "./masking.js";
+import { createMaskingController, flashButtonFeedback } from "./masking.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -122,6 +122,12 @@ function announce(text) {
 let activeStep = "transcribe"; // "transcribe" | "mask" | "unmask"
 let maskingCtrl = null;
 
+function syncRecordingBarVisibility() {
+  const bar = document.getElementById("recording-bar");
+  if (!bar) return;
+  bar.classList.toggle("hidden", activeStep !== "transcribe" && !isRecording);
+}
+
 function switchStep(step) {
   activeStep = step;
   const steps = ["transcribe", "mask", "unmask"];
@@ -132,6 +138,7 @@ function switchStep(step) {
     if (tab) tab.setAttribute("aria-selected", String(isCurrent));
     if (panel) panel.classList.toggle("hidden", !isCurrent);
   }
+  syncRecordingBarVisibility();
   if (step === "mask" && maskingCtrl) maskingCtrl.onEnterMaskStep();
   if (step === "unmask" && maskingCtrl) maskingCtrl.onEnterUnmaskStep();
 }
@@ -163,6 +170,7 @@ function setRecordingUI(state) {
     if (recordingStatusText) recordingStatusText.textContent = "Spelar in";
     if (btnRecord) btnRecord.setAttribute("aria-label", "Stoppa inspelning");
   }
+  syncRecordingBarVisibility();
 }
 
 const loadingOverlay = document.getElementById("loading-overlay");
@@ -356,7 +364,7 @@ async function updateDiskInfo() {
 
 let firstMicDeviceId = null;
 async function loadMicrophones() {
-  if (!selMic) return;
+  if (!selMic || !navigator.userAgent.includes("Windows")) return;
   try {
     const permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     permStream.getTracks().forEach(t => t.stop());
@@ -437,6 +445,47 @@ async function setupEventListeners() {
     const footerModel = document.getElementById("footer-model");
     if (footerModel && backend) {
       footerModel.textContent = `Pianissimo (${backend})`;
+    }
+  });
+
+  // Dra och släpp ljud-/videofiler (→ Steg 1) eller textfiler (→ Steg 2)
+  const dropOverlay = document.getElementById("drop-overlay");
+  const AUDIO_EXTS = new Set(["mp3", "m4a", "aac", "wav", "ogg", "flac", "mp4", "webm", "mkv", "mov"]);
+  const TEXT_EXTS = new Set(["txt", "md", "csv", "json"]);
+
+  await listen("tauri://drag-enter", () => {
+    if (!isRecording) dropOverlay?.classList.remove("hidden");
+  });
+  await listen("tauri://drag-leave", () => {
+    dropOverlay?.classList.add("hidden");
+  });
+  await listen("tauri://drag-drop", async (event) => {
+    dropOverlay?.classList.add("hidden");
+    if (isRecording) return;
+    const paths = event.payload?.paths;
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    const filePath = paths[0];
+    const ext = (filePath.split(".").pop() || "").toLowerCase();
+    if (AUDIO_EXTS.has(ext)) {
+      switchStep("transcribe");
+      disableControls();
+      await processAudioFile(filePath);
+    } else if (TEXT_EXTS.has(ext)) {
+      try {
+        const picked = await invoke("read_text_file", { path: filePath });
+        if (picked && picked.content) {
+          const baseLabel = (picked.fileName || "text").replace(/\.[^.]+$/, "");
+          await loadRawTextForMasking(
+            picked.content,
+            baseLabel,
+            `Öppnade "${picked.fileName}" — klar för maskering.`
+          );
+        }
+      } catch (e) {
+        await message(`Kunde inte öppna textfilen: ${e}`, { title: "Fel", kind: "error" });
+      }
+    } else {
+      showNotice(`Filtypen ".${ext}" stöds inte. Släpp en ljud-/videofil eller textfil (.txt, .md, .csv, .json).`);
     }
   });
 
@@ -616,7 +665,61 @@ async function initialize() {
     if (wasapiHint) wasapiHint.classList.toggle("hidden", wasapiEnabled);
     const stereoHelp = document.getElementById("btn-stereo-mix-help");
     if (stereoHelp) { stereoHelp.classList.remove("hidden"); stereoHelp.classList.add("flex"); }
+  } else {
+    btnRecord?.classList.add("hidden");
+    document.getElementById("mic-select-wrap")?.classList.add("hidden");
+    const macOpenBtn = document.getElementById("btn-mac-open-audio");
+    macOpenBtn?.classList.remove("hidden");
+    macOpenBtn?.addEventListener("click", async () => {
+      try {
+        const selected = await invoke("pick_audio_file");
+        if (selected) {
+          switchStep("transcribe");
+          disableControls();
+          await processAudioFile(selected);
+        }
+      } catch (e) {
+        console.error("Kunde inte öppna ljudfil:", e);
+      }
+    });
   }
+
+  document.getElementById("btn-new-session")?.addEventListener("click", async () => {
+    if (isRecording) return;
+    const hasContent =
+      Boolean(outputText.value && outputText.value.trim()) ||
+      transcriptSegments.length > 0 ||
+      Boolean(document.getElementById("unmask-input")?.value?.trim());
+    if (hasContent) {
+      const ok = await showConfirm(
+        "Rensa arbetsytan och börja på en ny transkribering eller maskering? Sparade inspelningar på disk påverkas inte.",
+        "Ny arbetsyta",
+        "Rensa"
+      );
+      if (!ok) return;
+    }
+    hidePostRecordingActions();
+    hideNotice();
+    pendingRecording = null;
+    teardownPlayer();
+    outputText.value = "";
+    transcriptSegments = [];
+    segmentRowsCache = [];
+    speakerNames = {};
+    lastTranscribedPath = null;
+    wasapiRecordingReady = false;
+    currentSessionDir = null;
+    const editor = document.getElementById("segment-editor");
+    if (editor) editor.replaceChildren();
+    document.getElementById("btn-segment-toggle")?.classList.add("hidden");
+    btnRedo.classList.add("hidden");
+    btnSaveAudio?.classList.add("hidden");
+    showRawView();
+    maskingCtrl?.resetMaskState();
+    switchStep("transcribe");
+    outputText.focus();
+    announce("Arbetsytan har rensats.");
+  });
 
   await ensurePianissimoReady();
 }
@@ -647,7 +750,7 @@ function setupSearchAndModals() {
 
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "f" && activeStep === "transcribe") {
-      if (!outputText || !outputText.value) return;
+      if ((!outputText || !outputText.value) && transcriptSegments.length === 0) return;
       e.preventDefault();
       openSearch();
     }
@@ -658,23 +761,60 @@ function setupSearchAndModals() {
 
   btnReplaceOne?.addEventListener("click", () => {
     const needle = searchInput ? searchInput.value : "";
+    const repl = replaceInput ? replaceInput.value : "";
     if (!needle || !outputText) return;
+    if (segmentViewActive && transcriptSegments.length > 0) {
+      const seg = transcriptSegments.find((s) => s.text.includes(needle));
+      if (!seg) {
+        if (searchInput) { searchInput.style.color = "red"; setTimeout(() => searchInput.style.color = "", 800); }
+        return;
+      }
+      const idx = seg.text.indexOf(needle);
+      seg.text = seg.text.slice(0, idx) + repl + seg.text.slice(idx + needle.length);
+      seg.tokens = [];
+      outputText.value = buildPlainText();
+      renderSegmentEditor();
+      saveCurrentTranscriptSoon();
+      return;
+    }
     const text = outputText.value;
     const idx = text.indexOf(needle);
     if (idx === -1) {
       if (searchInput) { searchInput.style.color = "red"; setTimeout(() => searchInput.style.color = "", 800); }
       return;
     }
-    outputText.value = text.slice(0, idx) + (replaceInput ? replaceInput.value : "") + text.slice(idx + needle.length);
+    outputText.value = text.slice(0, idx) + repl + text.slice(idx + needle.length);
+    saveCurrentTranscriptSoon();
   });
 
   btnReplaceAll?.addEventListener("click", () => {
     const needle = searchInput ? searchInput.value : "";
-    if (!needle || !outputText || !outputText.value) return;
-    const count = outputText.value.split(needle).length - 1;
-    outputText.value = outputText.value.split(needle).join(replaceInput ? replaceInput.value : "");
+    const repl = replaceInput ? replaceInput.value : "";
+    if (!needle || !outputText) return;
+    let count = 0;
+    if (segmentViewActive && transcriptSegments.length > 0) {
+      for (const seg of transcriptSegments) {
+        const parts = seg.text.split(needle);
+        if (parts.length > 1) {
+          count += parts.length - 1;
+          seg.text = parts.join(repl);
+          seg.tokens = [];
+        }
+      }
+      if (count > 0) {
+        outputText.value = buildPlainText();
+        renderSegmentEditor();
+        saveCurrentTranscriptSoon();
+      }
+    } else if (outputText.value) {
+      count = outputText.value.split(needle).length - 1;
+      if (count > 0) {
+        outputText.value = outputText.value.split(needle).join(repl);
+        saveCurrentTranscriptSoon();
+      }
+    }
     if (searchInput) {
-      searchInput.placeholder = `Ersatte ${count} förekomster`;
+      searchInput.placeholder = `Ersatte ${count} förekomst${count === 1 ? "" : "er"}`;
       setTimeout(() => { searchInput.placeholder = "Sök"; }, 2000);
     }
   });
@@ -828,11 +968,15 @@ function enableControls() {
   btnRecord.disabled = false;
   btnFile.disabled = false;
   btnSettings.disabled = false;
+  const macOpenBtn = document.getElementById("btn-mac-open-audio");
+  if (macOpenBtn) macOpenBtn.disabled = false;
 }
 function disableControls() {
   btnRecord.disabled = true;
   btnFile.disabled = true;
   btnSettings.disabled = true;
+  const macOpenBtn = document.getElementById("btn-mac-open-audio");
+  if (macOpenBtn) macOpenBtn.disabled = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -840,6 +984,7 @@ function disableControls() {
 // ─────────────────────────────────────────────────────────────────────────────
 btnSettings.addEventListener("click", () => {
   loadSettings();
+  maskingCtrl?.syncIgnoreListUI?.();
   settingsModal.classList.remove("hidden");
   refreshRecordingsUsage();
   refreshModelList();
@@ -881,11 +1026,6 @@ document.getElementById("btn-delete-recordings")?.addEventListener("click", asyn
 });
 
 btnCloseSettings.addEventListener("click", () => settingsModal.classList.add("hidden"));
-
-document.getElementById("confidence-threshold-slider")?.addEventListener("input", (e) => {
-  const label = document.getElementById("confidence-threshold-label");
-  if (label) label.textContent = e.target.value + "%";
-});
 
 document.getElementById("thread-count-slider")?.addEventListener("input", (e) => {
   const val = parseInt(e.target.value, 10);
@@ -1829,9 +1969,7 @@ btnCopy.addEventListener("click", () => {
   const text = getCurrentTranscriptText();
   if (!text) return;
   copyText(text).then(() => {
-    const prevIcon = btnCopy.innerHTML;
-    btnCopy.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad</span>`;
-    setTimeout(() => { btnCopy.innerHTML = prevIcon; }, 2000);
+    flashButtonFeedback(btnCopy, "Kopierad", 2000);
   });
 });
 

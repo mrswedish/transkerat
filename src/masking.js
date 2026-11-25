@@ -308,6 +308,39 @@ export function buildClipboardPayload(maskedText, table, templateId, customOrEdi
 
 // ── UI-kontroller för Steg 2 (Maskera) & Steg 3 (Avmaskera AI-svar) ──────────
 
+export function flashButtonFeedback(btn, label, ms = 2000) {
+  if (!btn) return;
+  if (!btn._origNodes) {
+    btn._origNodes = [...btn.childNodes].map((n) => n.cloneNode(true));
+  }
+  if (btn._flashTimer) clearTimeout(btn._flashTimer);
+  const icon = document.createElement("span");
+  icon.className = "material-symbols-outlined";
+  icon.textContent = "check";
+  const txt = document.createElement("span");
+  txt.textContent = label;
+  btn.replaceChildren(icon, txt);
+  btn._flashTimer = setTimeout(() => {
+    btn.replaceChildren(...btn._origNodes.map((n) => n.cloneNode(true)));
+    btn._flashTimer = null;
+  }, ms);
+}
+
+export function parseIgnoreList(raw) {
+  if (!raw || typeof raw !== "string") return new Set();
+  const out = new Set();
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim().toLowerCase();
+    if (t && !t.startsWith("#")) out.add(t);
+  }
+  return out;
+}
+
+export function filterPermanentIgnores(matches, ignoreSet) {
+  if (!ignoreSet || ignoreSet.size === 0) return matches;
+  return matches.filter((m) => !ignoreSet.has((m.text || "").trim().toLowerCase()));
+}
+
 export const SENSITIVITY_LEVELS = {
   high: { name: "Hög", threshold: 0.45 },
   normal: { name: "Normal", threshold: 0.6 },
@@ -330,6 +363,8 @@ export function createMaskingController({
   let preset = "ai_safe"; // "ai_safe" | "strict"
   let sensitivity = localStorage.getItem("maskSensitivity") || "normal";
   if (!SENSITIVITY_LEVELS[sensitivity]) sensitivity = "normal";
+  let permanentIgnoreRaw = localStorage.getItem("maskPermanentIgnores") || "";
+  let permanentIgnoreSet = parseIgnoreList(permanentIgnoreRaw);
   let viewMode = "review"; // "review" | "masked"
   let sourceText = "";
   let allMatches = []; // [{ text, label, start, end, source }]
@@ -341,14 +376,13 @@ export function createMaskingController({
   let persistTimer = null;
   let unmaskDebounceTimer = null;
   let pendingBulkAction = null;
+  let pendingBulkAlways = null;
 
   // DOM refs
   const panelMask = document.getElementById("panel-mask");
   const btnAiSafe = document.getElementById("btn-preset-ai-safe");
   const btnStrict = document.getElementById("btn-preset-strict");
-  const btnSensHigh = document.getElementById("btn-sens-high");
-  const btnSensNormal = document.getElementById("btn-sens-normal");
-  const btnSensLow = document.getElementById("btn-sens-low");
+  const sensitivitySelect = document.getElementById("mask-sensitivity-select");
   const btnRunMask = document.getElementById("btn-run-mask");
   const btnMaskOpenText = document.getElementById("btn-mask-open-text");
   const btnMaskEmptyOpenText = document.getElementById("btn-mask-empty-open-text");
@@ -366,7 +400,9 @@ export function createMaskingController({
   const bulkBar = document.getElementById("mask-bulk-bar");
   const bulkText = document.getElementById("mask-bulk-text");
   const btnBulkApply = document.getElementById("btn-mask-bulk-apply");
+  const btnBulkAlways = document.getElementById("btn-mask-bulk-always");
   const btnBulkClose = document.getElementById("btn-mask-bulk-close");
+  const ignoreListInput = document.getElementById("mask-ignore-list-input");
   const emptyState = document.getElementById("mask-empty-state");
   const emptyMsg = document.getElementById("mask-empty-msg");
   const reviewEl = document.getElementById("mask-review");
@@ -502,14 +538,31 @@ export function createMaskingController({
 
   function hideBulkBar() {
     bulkBar?.classList.add("hidden");
+    btnBulkAlways?.classList.add("hidden");
     pendingBulkAction = null;
+    pendingBulkAlways = null;
   }
 
-  function showBulkBar(messageText, buttonLabel, onApply) {
+  function showBulkBar(messageText, buttonLabel, onApply, onAlways = null) {
     if (!bulkBar || !bulkText || !btnBulkApply) return;
     bulkText.textContent = messageText;
-    btnBulkApply.textContent = buttonLabel;
-    pendingBulkAction = onApply;
+    if (buttonLabel && onApply) {
+      btnBulkApply.textContent = buttonLabel;
+      btnBulkApply.classList.remove("hidden");
+      pendingBulkAction = onApply;
+    } else {
+      btnBulkApply.classList.add("hidden");
+      pendingBulkAction = null;
+    }
+    if (btnBulkAlways) {
+      if (onAlways) {
+        btnBulkAlways.classList.remove("hidden");
+        pendingBulkAlways = onAlways;
+      } else {
+        btnBulkAlways.classList.add("hidden");
+        pendingBulkAlways = null;
+      }
+    }
     bulkBar.classList.remove("hidden");
   }
 
@@ -518,7 +571,60 @@ export function createMaskingController({
     hideBulkBar();
     if (fn) fn();
   });
+  btnBulkAlways?.addEventListener("click", () => {
+    const fn = pendingBulkAlways;
+    hideBulkBar();
+    if (fn) fn();
+  });
   btnBulkClose?.addEventListener("click", hideBulkBar);
+
+  function syncIgnoreListUI() {
+    if (ignoreListInput && ignoreListInput.value !== permanentIgnoreRaw) {
+      ignoreListInput.value = permanentIgnoreRaw;
+    }
+  }
+
+  function savePermanentIgnoreRaw(raw) {
+    permanentIgnoreRaw = raw;
+    permanentIgnoreSet = parseIgnoreList(raw);
+    localStorage.setItem("maskPermanentIgnores", raw);
+    syncIgnoreListUI();
+  }
+
+  function addPermanentIgnoreTerm(term) {
+    const clean = (term || "").trim();
+    if (!clean) return;
+    const lower = clean.toLowerCase();
+    if (!permanentIgnoreSet.has(lower)) {
+      const lines = permanentIgnoreRaw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      lines.push(clean);
+      savePermanentIgnoreRaw(lines.join("\n"));
+    }
+    const before = allMatches.length;
+    allMatches = allMatches.filter((m) => (m.text || "").trim().toLowerCase() !== lower);
+    for (const s of [...ignoredStarts]) {
+      if (!allMatches.some((m) => m.start === s)) ignoredStarts.delete(s);
+    }
+    hideBulkBar();
+    recomputeAndRender();
+    const removed = before - allMatches.length;
+    announce(`Lade till "${clean}" i permanent undantagslista (${removed} förekomst${removed === 1 ? "" : "er"} borttagna).`);
+  }
+
+  syncIgnoreListUI();
+  ignoreListInput?.addEventListener("input", () => {
+    savePermanentIgnoreRaw(ignoreListInput.value);
+    if (allMatches.length > 0) {
+      const filtered = filterPermanentIgnores(allMatches, permanentIgnoreSet);
+      if (filtered.length !== allMatches.length) {
+        allMatches = filtered;
+        for (const s of [...ignoredStarts]) {
+          if (!allMatches.some((m) => m.start === s)) ignoredStarts.delete(s);
+        }
+        recomputeAndRender();
+      }
+    }
+  });
 
   btnRestoreIgnored?.addEventListener("click", () => {
     if (ignoredStarts.size === 0) return;
@@ -528,25 +634,21 @@ export function createMaskingController({
     announce("Alla undantagna markeringar återställdes.");
   });
 
-  function syncSensitivityButtons() {
-    btnSensHigh?.setAttribute("aria-pressed", String(sensitivity === "high"));
-    btnSensNormal?.setAttribute("aria-pressed", String(sensitivity === "normal"));
-    btnSensLow?.setAttribute("aria-pressed", String(sensitivity === "low"));
+  function syncSensitivitySelect() {
+    if (sensitivitySelect) sensitivitySelect.value = sensitivity;
   }
-  syncSensitivityButtons();
+  syncSensitivitySelect();
 
   function selectSensitivity(next) {
     if (sensitivity === next || !SENSITIVITY_LEVELS[next]) return;
     sensitivity = next;
     localStorage.setItem("maskSensitivity", sensitivity);
-    syncSensitivityButtons();
+    syncSensitivitySelect();
     if (sourceText.trim()) {
       analyzeCurrentTranscript();
     }
   }
-  btnSensHigh?.addEventListener("click", () => selectSensitivity("high"));
-  btnSensNormal?.addEventListener("click", () => selectSensitivity("normal"));
-  btnSensLow?.addEventListener("click", () => selectSensitivity("low"));
+  sensitivitySelect?.addEventListener("change", () => selectSensitivity(sensitivitySelect.value));
 
   btnMaskOpenText?.addEventListener("click", () => { if (onOpenTextFile) onOpenTextFile(); });
   btnMaskEmptyOpenText?.addEventListener("click", () => { if (onOpenTextFile) onOpenTextFile(); });
@@ -719,7 +821,7 @@ export function createMaskingController({
         tdCount.textContent = String(entry.count);
 
         const tdAction = document.createElement("td");
-        tdAction.className = "text-right";
+        tdAction.className = "text-right whitespace-nowrap";
         const btnExcl = document.createElement("button");
         btnExcl.type = "button";
         btnExcl.className = "btn btn-ghost btn-sm text-xs btn-danger";
@@ -740,7 +842,13 @@ export function createMaskingController({
             announce(`Undantog alla ${changed} förekomster av "${entry.originalText}".`);
           }
         });
-        tdAction.appendChild(btnExcl);
+        const btnAlways = document.createElement("button");
+        btnAlways.type = "button";
+        btnAlways.className = "btn btn-ghost btn-sm text-xs ml-1";
+        btnAlways.textContent = "Alltid";
+        btnAlways.title = `Lägg till "${entry.originalText}" i permanent undantagslista (maskeras aldrig framöver)`;
+        btnAlways.addEventListener("click", () => addPermanentIgnoreTerm(entry.originalText));
+        tdAction.append(btnExcl, btnAlways);
 
         tr.append(tdMask, tdOrig, tdCat, tdCount, tdAction);
         frag.appendChild(tr);
@@ -817,9 +925,9 @@ export function createMaskingController({
 
         recomputeAndRender();
 
-        if (siblings.length > 0) {
-          const total = siblings.length + 1;
-          if (!wasIgnored) {
+        if (!wasIgnored) {
+          if (siblings.length > 0) {
+            const total = siblings.length + 1;
             showBulkBar(
               `"${m.text}" undantogs. Det finns ${siblings.length} förekomst${siblings.length === 1 ? "" : "er"} till i texten.`,
               `Undanta alla (${total})`,
@@ -827,19 +935,29 @@ export function createMaskingController({
                 for (const s of siblings) ignoredStarts.add(s.start);
                 recomputeAndRender();
                 announce(`Undantog alla ${total} förekomster av "${m.text}".`);
-              }
+              },
+              () => addPermanentIgnoreTerm(m.text)
             );
           } else {
             showBulkBar(
-              `"${m.text}" maskeras igen. Det finns ${siblings.length} undantagna förekomst${siblings.length === 1 ? "" : "er"} till.`,
-              `Maskera alla (${total})`,
-              () => {
-                for (const s of siblings) ignoredStarts.delete(s.start);
-                recomputeAndRender();
-                announce(`Maskerar alla ${total} förekomster av "${m.text}".`);
-              }
+              `"${m.text}" undantogs för denna session.`,
+              null,
+              null,
+              () => addPermanentIgnoreTerm(m.text)
             );
           }
+        } else if (siblings.length > 0) {
+          const total = siblings.length + 1;
+          showBulkBar(
+            `"${m.text}" maskeras igen. Det finns ${siblings.length} undantagna förekomst${siblings.length === 1 ? "" : "er"} till.`,
+            `Maskera alla (${total})`,
+            () => {
+              for (const s of siblings) ignoredStarts.delete(s.start);
+              recomputeAndRender();
+              announce(`Maskerar alla ${total} förekomster av "${m.text}".`);
+            },
+            null
+          );
         } else {
           hideBulkBar();
         }
@@ -915,7 +1033,7 @@ export function createMaskingController({
       ignoredStarts.clear();
       if (emptyMsg) {
         emptyMsg.innerHTML =
-          "Det finns ingen text att maskera än. Spela in eller skriv text i <strong>steg 1</strong> först.";
+          "Transkribera ljud i steg 1, klistra in text med <strong>Ctrl+V</strong>, eller släpp/öppna en textfil direkt för att maskera personuppgifter 100 % lokalt.";
       }
       recomputeAndRender();
       return;
@@ -944,7 +1062,10 @@ export function createMaskingController({
         threshold,
       });
 
-      allMatches = fixByteOffsets(sourceText, rawMatches);
+      allMatches = filterPermanentIgnores(
+        fixByteOffsets(sourceText, rawMatches),
+        permanentIgnoreSet
+      );
       if (maskProgressBar) maskProgressBar.style.width = "100%";
       recomputeAndRender();
       announce(
@@ -1034,17 +1155,13 @@ export function createMaskingController({
           : tempEditedPrompt;
       const payload = buildClipboardPayload(maskedText, activeTable, selectedPromptId, override);
       await copyText(payload);
-      const prev = btnCopyMasked.innerHTML;
       const label = selectedPromptId === "none" ? "Kopierad!" : "Kopierad med prompt!";
-      btnCopyMasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>${label}</span>`;
+      flashButtonFeedback(btnCopyMasked, label, 2200);
       announce(
         selectedPromptId === "none"
           ? "Maskerad text är kopierad till urklipp."
           : `Maskerad text med AI-prompt (${PROMPT_TEMPLATES[selectedPromptId]?.name || ""}) är kopierad till urklipp.`
       );
-      setTimeout(() => {
-        btnCopyMasked.innerHTML = prev;
-      }, 2200);
     } catch (e) {
       await showMessage(`Kunde inte kopiera: ${e}`, { title: "Fel", kind: "error" });
     }
@@ -1108,18 +1225,12 @@ export function createMaskingController({
       } else {
         await copyText(plain);
       }
-      const prev = btnCopyUnmasked.innerHTML;
-      btnCopyUnmasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad!</span>`;
+      flashButtonFeedback(btnCopyUnmasked, "Kopierad!", 2000);
       announce("Formaterat avmaskerat svar är kopierat till urklipp.");
-      setTimeout(() => {
-        btnCopyUnmasked.innerHTML = prev;
-      }, 2000);
     } catch (_) {
       try {
         await copyText(plain);
-        const prev = btnCopyUnmasked.innerHTML;
-        btnCopyUnmasked.innerHTML = `<span class="material-symbols-outlined">check</span><span>Kopierad!</span>`;
-        setTimeout(() => { btnCopyUnmasked.innerHTML = prev; }, 2000);
+        flashButtonFeedback(btnCopyUnmasked, "Kopierad!", 2000);
       } catch (e) {
         await showMessage(`Kunde inte kopiera: ${e}`, { title: "Fel", kind: "error" });
       }
@@ -1182,6 +1293,10 @@ export function createMaskingController({
         preset = parsed.preset === "strict" ? "strict" : "ai_safe";
         btnAiSafe?.setAttribute("aria-pressed", String(preset === "ai_safe"));
         btnStrict?.setAttribute("aria-pressed", String(preset === "strict"));
+        if (parsed.sensitivity && SENSITIVITY_LEVELS[parsed.sensitivity]) {
+          sensitivity = parsed.sensitivity;
+          syncSensitivitySelect();
+        }
         sourceText = typeof parsed.sourceText === "string" ? parsed.sourceText : "";
         allMatches = Array.isArray(parsed.matches) ? parsed.matches : [];
         ignoredStarts = new Set(Array.isArray(parsed.ignoredStarts) ? parsed.ignoredStarts : []);
@@ -1198,8 +1313,10 @@ export function createMaskingController({
       allMatches = [];
       ignoredStarts.clear();
       savedOnDisk = false;
+      hideBulkBar();
       if (unmaskInput) unmaskInput.value = "";
       recomputeAndRender({ persist: false });
     },
+    syncIgnoreListUI,
   };
 }

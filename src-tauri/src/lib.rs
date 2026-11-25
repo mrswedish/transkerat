@@ -68,9 +68,21 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+const ALLOWED_MEDIA_EXTS: &[&str] = &[
+    "mp3", "m4a", "aac", "wav", "ogg", "flac", "mp4", "webm", "mkv", "mov",
+];
+const MAX_TEXT_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+
 #[tauri::command]
 fn allow_asset_path(app_handle: AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
+    let ok_ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ALLOWED_MEDIA_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+    if !ok_ext {
+        return Err("Endast ljud- och videofiler kan öppnas i uppspelaren.".to_string());
+    }
     if !p.is_file() {
         return Err(format!("Filen finns inte: {path}"));
     }
@@ -417,7 +429,11 @@ async fn start_backend_recording(
     std::fs::create_dir_all(&base_dir)
         .map_err(|e| format!("Kunde inte skapa inspelningsmapp {}: {e}", base_dir.display()))?;
 
-    let mut recorder = state.inner().audio_recorder.lock().unwrap();
+    let mut recorder = state
+        .inner()
+        .audio_recorder
+        .lock()
+        .map_err(|e| format!("Recorder-lås: {e}"))?;
     let result = recorder.start_recording(loopback_only, with_loopback, &base_dir);
     result?;
     Ok(RecordingStartResult {
@@ -427,7 +443,11 @@ async fn start_backend_recording(
 
 #[tauri::command]
 async fn stop_backend_recording(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut recorder = state.inner().audio_recorder.lock().unwrap();
+    let mut recorder = state
+        .inner()
+        .audio_recorder
+        .lock()
+        .map_err(|e| format!("Recorder-lås: {e}"))?;
     recorder.stop_recording()
 }
 
@@ -468,28 +488,28 @@ struct PickedTextFile {
     content: String,
 }
 
-/// Öppnar en befintlig textfil eller sparad transkribering (.txt, .md, .csv, .json) för direkt maskering.
-#[tauri::command]
-async fn pick_text_file(app_handle: AppHandle) -> Result<Option<PickedTextFile>, String> {
-    use tauri_plugin_dialog::FilePath;
-    let path = app_handle
-        .dialog()
-        .file()
-        .set_title("Öppna textfil eller transkribering")
-        .add_filter("Text & transkribering", &["txt", "md", "csv", "json"])
-        .blocking_pick_file();
-    let Some(FilePath::Path(p)) = path else {
-        return Ok(None);
-    };
+fn read_picked_text_path(p: &std::path::Path) -> Result<PickedTextFile, String> {
     let file_name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "text.txt".to_string());
-    let raw = fs::read_to_string(&p)
+    let meta = fs::metadata(p)
+        .map_err(|e| format!("Kunde inte läsa filen {file_name}: {e}"))?;
+    if meta.len() > MAX_TEXT_FILE_BYTES {
+        let mb = meta.len() as f64 / (1024.0 * 1024.0);
+        return Err(format!(
+            "Filen {file_name} är för stor ({mb:.1} MB). Högsta tillåtna storlek för textimport är 10 MB."
+        ));
+    }
+    let raw = fs::read_to_string(p)
         .map_err(|e| format!("Kunde inte läsa filen {file_name}: {e}"))?;
 
     // Om användaren öppnar en Transkerat-sparad transkribering.json, plocka ut texten snyggt.
-    let content = if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+    let content = if p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
         serde_json::from_str::<serde_json::Value>(&raw)
             .ok()
             .and_then(|v| {
@@ -510,7 +530,37 @@ async fn pick_text_file(app_handle: AppHandle) -> Result<Option<PickedTextFile>,
         raw
     };
 
-    Ok(Some(PickedTextFile { file_name, content }))
+    Ok(PickedTextFile { file_name, content })
+}
+
+/// Öppnar en befintlig textfil eller sparad transkribering (.txt, .md, .csv, .json) för direkt maskering.
+#[tauri::command]
+async fn pick_text_file(app_handle: AppHandle) -> Result<Option<PickedTextFile>, String> {
+    use tauri_plugin_dialog::FilePath;
+    let path = app_handle
+        .dialog()
+        .file()
+        .set_title("Öppna textfil eller transkribering")
+        .add_filter("Text & transkribering", &["txt", "md", "csv", "json"])
+        .blocking_pick_file();
+    let Some(FilePath::Path(p)) = path else {
+        return Ok(None);
+    };
+    Ok(Some(read_picked_text_path(&p)?))
+}
+
+/// Läser en textfil som släppts via Drag & Drop (begränsad till text-/transkriberingsändelser).
+#[tauri::command]
+async fn read_text_file(path: String) -> Result<PickedTextFile, String> {
+    let p = PathBuf::from(&path);
+    let ok_ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "txt" | "md" | "csv" | "json"));
+    if !ok_ext || !p.is_file() {
+        return Err("Filtypen stöds inte för textimport (använd .txt, .md, .csv eller .json).".into());
+    }
+    read_picked_text_path(&p)
 }
 
 #[tauri::command]
@@ -519,10 +569,7 @@ async fn pick_audio_file(app_handle: AppHandle) -> Result<Option<String>, String
     let path = app_handle
         .dialog()
         .file()
-        .add_filter(
-            "Ljud/Video",
-            &["mp3", "m4a", "aac", "wav", "ogg", "flac", "mp4", "webm", "mkv"],
-        )
+        .add_filter("Ljud/Video", ALLOWED_MEDIA_EXTS)
         .blocking_pick_file();
     match path {
         Some(FilePath::Path(p)) => Ok(Some(p.to_string_lossy().to_string())),
@@ -589,6 +636,7 @@ pub fn run() {
             save_text_file,
             pick_audio_file,
             pick_text_file,
+            read_text_file,
             logging::get_log_path,
             logging::log_message,
             logging::open_log_file,

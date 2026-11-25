@@ -172,29 +172,40 @@ pub(crate) async fn download_ner_files(app_handle: &AppHandle) -> Result<PathBuf
         let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         let mut stream = res.bytes_stream();
         let mut got: u64 = 0;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            file.write_all(&chunk).map_err(|e| e.to_string())?;
-            got += chunk.len() as u64;
-            let total_done = done_before + got;
-            let mb = total_done / 1_048_576;
-            if mb > last_emit_mb {
-                last_emit_mb = mb;
-                let progress = (total_done as f32 / total_expected as f32 * 99.0).min(99.0);
-                let _ = app_handle.emit(
-                    "ner_download_progress",
-                    NerDownloadProgress {
-                        phase: "downloading".into(),
-                        label: format!("Hämtar maskeringsmodell ({local_name})…"),
-                        downloaded: total_done,
-                        total: total_expected,
-                        progress,
-                    },
-                );
+        let write_res: Result<(), String> = async {
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).map_err(|e| e.to_string())?;
+                got += chunk.len() as u64;
+                let total_done = done_before + got;
+                let mb = total_done / 1_048_576;
+                if mb > last_emit_mb {
+                    last_emit_mb = mb;
+                    let progress = (total_done as f32 / total_expected as f32 * 99.0).min(99.0);
+                    let _ = app_handle.emit(
+                        "ner_download_progress",
+                        NerDownloadProgress {
+                            phase: "downloading".into(),
+                            label: format!("Hämtar maskeringsmodell ({local_name})…"),
+                            downloaded: total_done,
+                            total: total_expected,
+                            progress,
+                        },
+                    );
+                }
             }
+            Ok(())
         }
+        .await;
         drop(file);
-        fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+        if let Err(e) = write_res {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        fs::rename(&tmp, &target).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            e.to_string()
+        })?;
         done_before += approx;
     }
 
